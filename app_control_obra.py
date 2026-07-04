@@ -14,6 +14,7 @@ Versión 2.0 mejorada:
 Ejecutar con:  streamlit run app_control_obra.py
 """
 
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +27,41 @@ import streamlit as st
 # ---------------------------------------------------------------
 st.set_page_config(page_title="Control de Obra - Residencia JE132", layout="wide")
 
-DB_PATH = Path(__file__).parent / "control_obra_je132.db"
+# En Railway define la variable DB_DIR=/data (con un Volume montado en /data)
+# para que la base de datos sobreviva a los redespliegues.
+# En local, sin la variable, usa la carpeta del script.
+DB_PATH = Path(os.environ.get("DB_DIR", Path(__file__).parent)) / "control_obra_je132.db"
+
+
+# ---------------------------------------------------------------
+# CONTROL DE ACCESO
+# ---------------------------------------------------------------
+# En Railway define la variable APP_PASSWORD con la contraseña de acceso.
+# En local, si la variable no existe, la app abre sin pedir contraseña.
+def verificar_acceso() -> bool:
+    password_configurada = os.environ.get("APP_PASSWORD", "")
+    if not password_configurada:
+        return True  # Sin contraseña configurada (modo local/desarrollo)
+
+    if st.session_state.get("autenticado"):
+        return True
+
+    st.title("🔒 Control de Obra - Residencia JE132")
+    st.caption("DACAM & HOGAR 911 | Acceso restringido")
+    with st.form("form_login"):
+        pwd = st.text_input("Contraseña de acceso:", type="password")
+        entrar = st.form_submit_button("Entrar")
+    if entrar:
+        if pwd == password_configurada:
+            st.session_state.autenticado = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta.")
+    return False
+
+
+if not verificar_acceso():
+    st.stop()
 
 FASE_INDIRECTOS = "Gastos Indirectos"
 TIPOS_DIRECTOS = ["Materiales", "Mano de Obra"]
