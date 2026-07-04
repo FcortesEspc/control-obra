@@ -604,3 +604,184 @@ with tab_pagos:
                 hide_index=True,
                 **FULL_WIDTH,
             )
+
+# ---------------------------------------------------------------
+# VISTA 5: GENERACIÓN DE INFORMES (PDF Y EXCEL)
+# ---------------------------------------------------------------
+st.markdown("---")
+st.subheader("📄 Informes del Proyecto")
+
+
+def _dinero(v: float) -> str:
+    return f"${v:,.2f}"
+
+
+def generar_informe_pdf() -> bytes:
+    """Informe ejecutivo en PDF: resumen, desglose, fases y bitácoras."""
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=letter,
+        topMargin=1.5 * cm, bottomMargin=1.5 * cm, leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+        title="Informe de Control de Obra JE132",
+    )
+    styles = getSampleStyleSheet()
+    titulo = ParagraphStyle("titulo", parent=styles["Title"], fontSize=16, spaceAfter=2)
+    sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, textColor=colors.grey)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=12, spaceBefore=14, spaceAfter=6)
+    chico = ParagraphStyle("chico", parent=styles["Normal"], fontSize=8)
+
+    estilo_tabla = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f5f9")]),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ])
+
+    elementos = [
+        Paragraph("Informe de Control de Ejecución de Obra", titulo),
+        Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", styles["Normal"]),
+        Paragraph("Cliente: José Manuel Robles Miguel | Contratistas: DACAM & HOGAR 911", sub),
+        Paragraph(f"Fecha de emisión: {datetime.now():%d/%m/%Y %H:%M}", sub),
+        Spacer(1, 10),
+    ]
+
+    # --- Resumen financiero ---
+    elementos.append(Paragraph("1. Resumen Financiero", h2))
+    t_resumen = Table([
+        ["Concepto", "Monto"],
+        ["Presupuesto Total Contratado", _dinero(total_presupuestado)],
+        ["Total Ejecutado (Real)", f"{_dinero(total_real)}  ({pct_ejercido:.1f}%)"],
+        ["Cobrado al Cliente", f"{_dinero(total_cobrado)}  ({pct_cobrado:.1f}%)"],
+        ["Saldo en Caja (Cobrado - Gastado)", _dinero(saldo_caja)],
+    ], colWidths=[10 * cm, 7 * cm])
+    t_resumen.setStyle(estilo_tabla)
+    elementos.append(t_resumen)
+
+    # --- Desglose ---
+    elementos.append(Paragraph("2. Desglose: Presupuesto vs. Real", h2))
+    filas_desglose = [["Desglose", "Presupuesto", "Real", "Desviación", "% Ejercido"]]
+    for _, r in tabla_comparativa.iterrows():
+        filas_desglose.append([
+            r["Desglose"], _dinero(r["Presupuesto Base"]), _dinero(r["Gasto Real Realizado"]),
+            _dinero(r["Diferencia / Desviación"]), f"{r['% Ejercido']:.1f}%",
+        ])
+    t_desglose = Table(filas_desglose, colWidths=[6 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm, 2 * cm])
+    t_desglose.setStyle(estilo_tabla)
+    elementos.append(t_desglose)
+
+    # --- Fases ---
+    elementos.append(Paragraph("3. Control por Fases", h2))
+    filas_fases = [["Fase", "Presupuesto", "Real", "% Financ.", "% Físico", "Estado"]]
+    for _, r in df_resumen_fases.iterrows():
+        estado = "ATENCIÓN" if r["Alerta"] == "🔴" else "OK"
+        filas_fases.append([
+            Paragraph(r["Fase de Obra"], chico), _dinero(r["Total Presupuestado"]),
+            _dinero(r["Total Real Fase"]), f"{r['% Avance Financiero']:.1f}%",
+            f"{r['% Avance Físico']:.0f}%", estado,
+        ])
+    t_fases = Table(filas_fases, colWidths=[6.5 * cm, 3 * cm, 3 * cm, 1.9 * cm, 1.7 * cm, 1.7 * cm])
+    t_fases.setStyle(estilo_tabla)
+    elementos.append(t_fases)
+    elementos.append(Paragraph(
+        "ATENCIÓN = el avance financiero supera al físico por más de 10 puntos "
+        "(posible sobrecosto o adelanto de compras).", chico))
+
+    # --- Bitácora de gastos ---
+    elementos.append(Paragraph("4. Bitácora de Gastos", h2))
+    if df_gastos.empty:
+        elementos.append(Paragraph("Sin gastos registrados.", styles["Normal"]))
+    else:
+        filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
+        for _, r in df_gastos.sort_values(["fecha", "id"]).iterrows():
+            filas_g.append([
+                str(r["id"]), r["fecha"], Paragraph(r["fase"].split(":")[0], chico),
+                Paragraph(r["tipo"], chico), _dinero(r["monto"]),
+                Paragraph(str(r["proveedor"] or ""), chico), Paragraph(str(r["descripcion"]), chico),
+            ])
+        t_g = Table(filas_g, colWidths=[1.2 * cm, 2 * cm, 1.9 * cm, 2.4 * cm, 2.4 * cm, 3.3 * cm, 4.6 * cm], repeatRows=1)
+        t_g.setStyle(estilo_tabla)
+        elementos.append(t_g)
+
+    # --- Pagos del cliente ---
+    elementos.append(Paragraph("5. Pagos del Cliente", h2))
+    if df_pagos.empty:
+        elementos.append(Paragraph("Sin pagos registrados.", styles["Normal"]))
+    else:
+        filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
+        for _, r in df_pagos.sort_values(["fecha", "id"]).iterrows():
+            filas_p.append([str(r["id"]), r["fecha"], Paragraph(str(r["concepto"]), chico), _dinero(r["monto"])])
+        filas_p.append(["", "", "TOTAL COBRADO", _dinero(total_cobrado)])
+        t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
+        t_p.setStyle(estilo_tabla)
+        elementos.append(t_p)
+
+    elementos.append(Spacer(1, 16))
+    elementos.append(Paragraph(
+        f"Documento generado automáticamente por el Sistema de Control de Obra "
+        f"(control.hogar911.com) el {datetime.now():%d/%m/%Y a las %H:%M}.", chico))
+
+    doc.build(elementos)
+    return buf.getvalue()
+
+
+def generar_informe_excel() -> bytes:
+    """Informe en Excel con hojas: Resumen, Desglose, Fases, Gastos y Pagos."""
+    from io import BytesIO
+
+    buf = BytesIO()
+    df_resumen = pd.DataFrame({
+        "Concepto": [
+            "Presupuesto Total Contratado", "Total Ejecutado (Real)",
+            "Cobrado al Cliente", "Saldo en Caja (Cobrado - Gastado)",
+        ],
+        "Monto": [total_presupuestado, total_real, total_cobrado, saldo_caja],
+    })
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
+        tabla_comparativa.to_excel(writer, sheet_name="Desglose", index=False)
+        df_resumen_fases.drop(columns=["Alerta"]).to_excel(writer, sheet_name="Fases", index=False)
+        df_gastos.drop(columns=["comprobante"]).to_excel(writer, sheet_name="Gastos", index=False)
+        df_pagos.to_excel(writer, sheet_name="Pagos", index=False)
+    return buf.getvalue()
+
+
+col_pdf, col_xls = st.columns(2)
+fecha_archivo = f"{datetime.now():%Y%m%d}"
+with col_pdf:
+    try:
+        st.download_button(
+            "📄 Descargar Informe Ejecutivo (PDF)",
+            generar_informe_pdf(),
+            file_name=f"informe_obra_JE132_{fecha_archivo}.pdf",
+            mime="application/pdf",
+            **FULL_WIDTH,
+        )
+        st.caption("Ideal para enviar al cliente o imprimir: resumen, fases y bitácoras.")
+    except ImportError:
+        st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+with col_xls:
+    try:
+        st.download_button(
+            "📊 Descargar Informe en Excel",
+            generar_informe_excel(),
+            file_name=f"informe_obra_JE132_{fecha_archivo}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            **FULL_WIDTH,
+        )
+        st.caption("Hojas separadas: Resumen, Desglose, Fases, Gastos y Pagos.")
+    except ImportError:
+        st.error("Falta la librería openpyxl. Agrega 'openpyxl' al requirements.txt.")
