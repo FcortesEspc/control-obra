@@ -1,15 +1,22 @@
 """
 Sistema de Control de Ejecución de Obra - Residencia JE132
-Versión 2.0 mejorada:
-  - Persistencia real con SQLite (sobrevive refrescos y reinicios)
-  - Total presupuestado calculado, no hardcodeado
-  - Lógica de indirectos corregida (sin combinaciones incoherentes)
-  - Fecha, proveedor y folio en cada registro
-  - Eliminación de registros erróneos desde la bitácora
-  - Control separado de pagos del cliente (anticipo y estimaciones)
-  - Avance físico por fase vs avance financiero
-  - Gráfica comparativa presupuesto vs real
-  - Exportación de la bitácora a CSV
+Versión 3.0:
+  - ROLES DE USUARIO:
+      * Administrador (ADMIN_PASSWORD): captura gastos/pagos, elimina registros,
+        actualiza avance físico y adjunta comprobantes.
+      * Cliente (CLIENTE_PASSWORD): solo consulta el dashboard, sin captura ni edición.
+      * Compatibilidad: si solo existe APP_PASSWORD, funciona como contraseña de admin.
+      * Modo local: sin variables de entorno, abre directo como admin.
+  - COMPROBANTES: foto (JPG/PNG/WebP) o PDF adjunto a cada gasto, guardado en el
+    volume persistente. Las imágenes se comprimen automáticamente (máx 1600px,
+    JPEG 80%) para cuidar el espacio. Visor integrado en la bitácora.
+  - Todo lo de la v2: SQLite persistente, pagos del cliente, avance físico vs
+    financiero con semáforo, gráficas, exportación a CSV.
+
+Variables de entorno en Railway:
+  DB_DIR           = /data          (volume montado)
+  ADMIN_PASSWORD   = contraseña del equipo DACAM/HOGAR 911
+  CLIENTE_PASSWORD = contraseña de solo lectura para el cliente
 
 Ejecutar con:  streamlit run app_control_obra.py
 """
@@ -27,23 +34,46 @@ import streamlit as st
 # ---------------------------------------------------------------
 st.set_page_config(page_title="Control de Obra - Residencia JE132", layout="wide")
 
-# En Railway define la variable DB_DIR=/data (con un Volume montado en /data)
-# para que la base de datos sobreviva a los redespliegues.
-# En local, sin la variable, usa la carpeta del script.
-DB_PATH = Path(os.environ.get("DB_DIR", Path(__file__).parent)) / "control_obra_je132.db"
+DB_DIR = Path(os.environ.get("DB_DIR", Path(__file__).parent))
+DB_PATH = DB_DIR / "control_obra_je132.db"
+COMPROBANTES_DIR = DB_DIR / "comprobantes"
+COMPROBANTES_DIR.mkdir(parents=True, exist_ok=True)
+
+FASE_INDIRECTOS = "Gastos Indirectos"
+TIPOS_DIRECTOS = ["Materiales", "Mano de Obra"]
+EXTENSIONES_IMAGEN = {".jpg", ".jpeg", ".png", ".webp"}
+
+# Compatibilidad de ancho entre versiones de Streamlit (>=1.46 usa width="stretch")
+try:
+    _ver = tuple(int(x) for x in st.__version__.split(".")[:2])
+except Exception:
+    _ver = (0, 0)
+FULL_WIDTH = {"width": "stretch"} if _ver >= (1, 46) else {"use_container_width": True}
 
 
 # ---------------------------------------------------------------
-# CONTROL DE ACCESO
+# CONTROL DE ACCESO Y ROLES
 # ---------------------------------------------------------------
-# En Railway define la variable APP_PASSWORD con la contraseña de acceso.
-# En local, si la variable no existe, la app abre sin pedir contraseña.
+def determinar_rol(pwd: str) -> str | None:
+    """Devuelve 'admin', 'cliente' o None según la contraseña ingresada."""
+    admin_pwd = os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD", "")
+    cliente_pwd = os.environ.get("CLIENTE_PASSWORD", "")
+    if admin_pwd and pwd == admin_pwd:
+        return "admin"
+    if cliente_pwd and pwd == cliente_pwd:
+        return "cliente"
+    return None
+
+
 def verificar_acceso() -> bool:
-    password_configurada = os.environ.get("APP_PASSWORD", "")
-    if not password_configurada:
-        return True  # Sin contraseña configurada (modo local/desarrollo)
+    hay_passwords = bool(
+        os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")
+    )
+    if not hay_passwords:
+        st.session_state.rol = "admin"  # Modo local/desarrollo
+        return True
 
-    if st.session_state.get("autenticado"):
+    if st.session_state.get("rol"):
         return True
 
     st.title("🔒 Control de Obra - Residencia JE132")
@@ -52,8 +82,9 @@ def verificar_acceso() -> bool:
         pwd = st.text_input("Contraseña de acceso:", type="password")
         entrar = st.form_submit_button("Entrar")
     if entrar:
-        if pwd == password_configurada:
-            st.session_state.autenticado = True
+        rol = determinar_rol(pwd)
+        if rol:
+            st.session_state.rol = rol
             st.rerun()
         else:
             st.error("Contraseña incorrecta.")
@@ -63,15 +94,7 @@ def verificar_acceso() -> bool:
 if not verificar_acceso():
     st.stop()
 
-FASE_INDIRECTOS = "Gastos Indirectos"
-TIPOS_DIRECTOS = ["Materiales", "Mano de Obra"]
-
-# Compatibilidad de ancho entre versiones de Streamlit (>=1.46 usa width="stretch")
-try:
-    _ver = tuple(int(x) for x in st.__version__.split(".")[:2])
-except Exception:
-    _ver = (0, 0)
-FULL_WIDTH = {"width": "stretch"} if _ver >= (1, 46) else {"use_container_width": True}
+ES_ADMIN = st.session_state.get("rol") == "admin"
 
 
 # ---------------------------------------------------------------
@@ -92,7 +115,6 @@ def obtener_presupuesto_base() -> pd.DataFrame:
     return df
 
 
-# Indirectos fijos según cotización
 INDIRECTOS = {
     "Proyecto Arquitectónico, Dirección y Supervisión": 125000.0,
     "Gestión Administrativa y Control": 112284.0,
@@ -104,7 +126,6 @@ FASES = df_presupuesto["Fase"].tolist()
 p_materiales = df_presupuesto["Materiales"].sum()
 p_mano_obra = df_presupuesto["Mano de Obra"].sum()
 p_indirectos = sum(INDIRECTOS.values())
-# Total CALCULADO: si mañana cambia una fase, el total se ajusta solo.
 total_presupuestado = p_materiales + p_mano_obra + p_indirectos
 
 
@@ -143,12 +164,17 @@ def init_db() -> None:
             );
             """
         )
+        # Migración v3: columna de comprobante en gastos (si la BD viene de la v2)
+        columnas = [c[1] for c in conn.execute("PRAGMA table_info(gastos)").fetchall()]
+        if "comprobante" not in columnas:
+            conn.execute("ALTER TABLE gastos ADD COLUMN comprobante TEXT")
 
 
 def leer_gastos() -> pd.DataFrame:
     with get_conn() as conn:
         return pd.read_sql_query(
-            "SELECT id, fecha, fase, tipo, monto, proveedor, descripcion FROM gastos ORDER BY fecha DESC, id DESC",
+            "SELECT id, fecha, fase, tipo, monto, proveedor, descripcion, comprobante "
+            "FROM gastos ORDER BY fecha DESC, id DESC",
             conn,
         )
 
@@ -166,12 +192,40 @@ def leer_avance_fisico() -> dict:
     return {fase: pct for fase, pct in rows}
 
 
-def insertar_gasto(fecha: str, fase: str, tipo: str, monto: float, proveedor: str, descripcion: str) -> None:
+def insertar_gasto(fecha: str, fase: str, tipo: str, monto: float, proveedor: str, descripcion: str) -> int:
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO gastos (fecha, fase, tipo, monto, proveedor, descripcion) VALUES (?, ?, ?, ?, ?, ?)",
             (fecha, fase, tipo, monto, proveedor.strip(), descripcion.strip()),
         )
+        return cur.lastrowid
+
+
+def guardar_comprobante(gasto_id: int, archivo) -> str | None:
+    """Guarda la foto o PDF del comprobante en el volume. Comprime imágenes grandes."""
+    ext = Path(archivo.name).suffix.lower()
+    if ext not in EXTENSIONES_IMAGEN and ext != ".pdf":
+        return None
+    nombre = f"gasto_{gasto_id}{ext}"
+    destino = COMPROBANTES_DIR / nombre
+
+    if ext in EXTENSIONES_IMAGEN:
+        try:
+            from PIL import Image
+
+            img = Image.open(archivo)
+            img.thumbnail((1600, 1600))  # Reduce fotos de celular (~4000px) sin perder legibilidad
+            if ext in (".jpg", ".jpeg") and img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.save(destino, quality=80, optimize=True)
+        except Exception:
+            destino.write_bytes(archivo.getbuffer())  # Si falla la compresión, guarda original
+    else:
+        destino.write_bytes(archivo.getbuffer())
+
+    with get_conn() as conn:
+        conn.execute("UPDATE gastos SET comprobante = ? WHERE id = ?", (nombre, gasto_id))
+    return nombre
 
 
 def insertar_pago(fecha: str, concepto: str, monto: float) -> None:
@@ -182,12 +236,23 @@ def insertar_pago(fecha: str, concepto: str, monto: float) -> None:
         )
 
 
-def eliminar_registros(tabla: str, ids: list[int]) -> None:
+def eliminar_gastos(ids: list[int]) -> None:
+    """Elimina gastos y sus archivos de comprobante asociados."""
     if not ids:
         return
-    assert tabla in ("gastos", "pagos_cliente")
     with get_conn() as conn:
-        conn.executemany(f"DELETE FROM {tabla} WHERE id = ?", [(int(i),) for i in ids])
+        for gid in ids:
+            row = conn.execute("SELECT comprobante FROM gastos WHERE id = ?", (int(gid),)).fetchone()
+            if row and row[0]:
+                (COMPROBANTES_DIR / row[0]).unlink(missing_ok=True)
+            conn.execute("DELETE FROM gastos WHERE id = ?", (int(gid),))
+
+
+def eliminar_pagos(ids: list[int]) -> None:
+    if not ids:
+        return
+    with get_conn() as conn:
+        conn.executemany("DELETE FROM pagos_cliente WHERE id = ?", [(int(i),) for i in ids])
 
 
 def guardar_avance_fisico(avances: dict) -> None:
@@ -212,68 +277,87 @@ st.subheader("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)")
 st.caption("Cliente: José Manuel Robles Miguel | Contratistas: DACAM & HOGAR 911")
 
 # ---------------------------------------------------------------
-# PANEL LATERAL: CAPTURA
+# PANEL LATERAL
 # ---------------------------------------------------------------
-st.sidebar.header("📝 Captura de movimientos")
+rol_texto = "👷 Administrador" if ES_ADMIN else "👤 Cliente (solo consulta)"
+st.sidebar.markdown(f"**Sesión:** {rol_texto}")
+if os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD") or os.environ.get("CLIENTE_PASSWORD"):
+    if st.sidebar.button("Cerrar sesión"):
+        st.session_state.pop("rol", None)
+        st.session_state.pop("autenticado", None)
+        st.rerun()
+st.sidebar.markdown("---")
 
-# --- Registro de gastos ---
-with st.sidebar.expander("Registrar gasto de obra", expanded=True):
-    fase_seleccionada = st.selectbox("Fase:", FASES + [FASE_INDIRECTOS], key="g_fase")
+if ES_ADMIN:
+    st.sidebar.header("📝 Captura de movimientos")
 
-    # Lógica corregida: los indirectos NO se mezclan con las fases de obra.
-    if fase_seleccionada == FASE_INDIRECTOS:
-        tipo_gasto = FASE_INDIRECTOS
-        st.caption("Los indirectos se registran fuera de las fases de obra.")
-    else:
-        tipo_gasto = st.selectbox("Tipo de desglose:", TIPOS_DIRECTOS, key="g_tipo")
+    # --- Registro de gastos (con comprobante) ---
+    with st.sidebar.expander("Registrar gasto de obra", expanded=True):
+        fase_seleccionada = st.selectbox("Fase:", FASES + [FASE_INDIRECTOS], key="g_fase")
 
-    with st.form("form_gasto", clear_on_submit=True):
-        fecha_gasto = st.date_input("Fecha del gasto:", value=datetime.now().date())
-        monto_gasto = st.number_input("Monto ($ MXN):", min_value=0.0, step=500.0)
-        proveedor = st.text_input("Proveedor / Beneficiario:")
-        descripcion_gasto = st.text_input("Descripción (Ej. Compra de varilla, Pago de destajo):")
-        if st.form_submit_button("Guardar gasto"):
-            if monto_gasto <= 0:
-                st.error("El monto debe ser mayor a 0.")
-            elif not descripcion_gasto.strip():
-                st.error("La descripción es obligatoria para la bitácora.")
-            else:
-                insertar_gasto(
-                    fecha_gasto.isoformat(), fase_seleccionada, tipo_gasto,
-                    monto_gasto, proveedor, descripcion_gasto,
-                )
-                st.success("¡Gasto registrado!")
+        if fase_seleccionada == FASE_INDIRECTOS:
+            tipo_gasto = FASE_INDIRECTOS
+            st.caption("Los indirectos se registran fuera de las fases de obra.")
+        else:
+            tipo_gasto = st.selectbox("Tipo de desglose:", TIPOS_DIRECTOS, key="g_tipo")
 
-# --- Registro de pagos del cliente ---
-with st.sidebar.expander("Registrar pago del cliente"):
-    st.caption("Anticipo, estimaciones y pagos parciales. El saldo en caja se calcula contra estos cobros, no contra el presupuesto.")
-    with st.form("form_pago", clear_on_submit=True):
-        fecha_pago = st.date_input("Fecha del pago:", value=datetime.now().date(), key="p_fecha")
-        concepto_pago = st.text_input("Concepto (Ej. Anticipo inicial, Estimación 1):")
-        monto_pago = st.number_input("Monto ($ MXN):", min_value=0.0, step=1000.0, key="p_monto")
-        if st.form_submit_button("Guardar pago"):
-            if monto_pago <= 0:
-                st.error("El monto debe ser mayor a 0.")
-            elif not concepto_pago.strip():
-                st.error("El concepto es obligatorio.")
-            else:
-                insertar_pago(fecha_pago.isoformat(), concepto_pago, monto_pago)
-                st.success("¡Pago registrado!")
-
-# --- Avance físico ---
-with st.sidebar.expander("Actualizar avance físico"):
-    st.caption("Porcentaje real de ejecución en campo por fase.")
-    avance_actual = leer_avance_fisico()
-    with st.form("form_avance"):
-        nuevos_avances = {}
-        for fase in FASES:
-            etiqueta = fase.split(":")[0]  # "Fase 1", "Fase 2"...
-            nuevos_avances[fase] = st.slider(
-                etiqueta, 0, 100, int(avance_actual.get(fase, 0)), key=f"av_{fase}"
+        with st.form("form_gasto", clear_on_submit=True):
+            fecha_gasto = st.date_input("Fecha del gasto:", value=datetime.now().date())
+            monto_gasto = st.number_input("Monto ($ MXN):", min_value=0.0, step=500.0)
+            proveedor = st.text_input("Proveedor / Beneficiario:")
+            descripcion_gasto = st.text_input("Descripción (Ej. Compra de varilla, Pago de destajo):")
+            archivo_comprobante = st.file_uploader(
+                "Comprobante (foto de nota, factura o PDF):",
+                type=["jpg", "jpeg", "png", "webp", "pdf"],
             )
-        if st.form_submit_button("Guardar avance"):
-            guardar_avance_fisico({f: float(p) for f, p in nuevos_avances.items()})
-            st.success("Avance actualizado.")
+            if st.form_submit_button("Guardar gasto"):
+                if monto_gasto <= 0:
+                    st.error("El monto debe ser mayor a 0.")
+                elif not descripcion_gasto.strip():
+                    st.error("La descripción es obligatoria para la bitácora.")
+                else:
+                    nuevo_id = insertar_gasto(
+                        fecha_gasto.isoformat(), fase_seleccionada, tipo_gasto,
+                        monto_gasto, proveedor, descripcion_gasto,
+                    )
+                    if archivo_comprobante is not None:
+                        guardar_comprobante(nuevo_id, archivo_comprobante)
+                        st.success(f"¡Gasto #{nuevo_id} registrado con comprobante! 📎")
+                    else:
+                        st.success(f"¡Gasto #{nuevo_id} registrado!")
+
+    # --- Registro de pagos del cliente ---
+    with st.sidebar.expander("Registrar pago del cliente"):
+        st.caption("Anticipo, estimaciones y pagos parciales. El saldo en caja se calcula contra estos cobros.")
+        with st.form("form_pago", clear_on_submit=True):
+            fecha_pago = st.date_input("Fecha del pago:", value=datetime.now().date(), key="p_fecha")
+            concepto_pago = st.text_input("Concepto (Ej. Anticipo inicial, Estimación 1):")
+            monto_pago = st.number_input("Monto ($ MXN):", min_value=0.0, step=1000.0, key="p_monto")
+            if st.form_submit_button("Guardar pago"):
+                if monto_pago <= 0:
+                    st.error("El monto debe ser mayor a 0.")
+                elif not concepto_pago.strip():
+                    st.error("El concepto es obligatorio.")
+                else:
+                    insertar_pago(fecha_pago.isoformat(), concepto_pago, monto_pago)
+                    st.success("¡Pago registrado!")
+
+    # --- Avance físico ---
+    with st.sidebar.expander("Actualizar avance físico"):
+        st.caption("Porcentaje real de ejecución en campo por fase.")
+        avance_actual_form = leer_avance_fisico()
+        with st.form("form_avance"):
+            nuevos_avances = {}
+            for fase in FASES:
+                etiqueta = fase.split(":")[0]
+                nuevos_avances[fase] = st.slider(
+                    etiqueta, 0, 100, int(avance_actual_form.get(fase, 0)), key=f"av_{fase}"
+                )
+            if st.form_submit_button("Guardar avance"):
+                guardar_avance_fisico({f: float(p) for f, p in nuevos_avances.items()})
+                st.success("Avance actualizado.")
+else:
+    st.sidebar.info("Estás en modo consulta. Puedes revisar el avance financiero, físico y los comprobantes del proyecto.")
 
 # ---------------------------------------------------------------
 # LECTURA DE DATOS
@@ -312,7 +396,7 @@ with col4:
         delta_color="normal",
     )
 
-if saldo_caja < 0:
+if saldo_caja < 0 and ES_ADMIN:
     st.warning("⚠️ El gasto ejecutado supera lo cobrado al cliente. Considera solicitar la siguiente estimación.")
 
 st.markdown("---")
@@ -381,7 +465,6 @@ for _, row in df_presupuesto.iterrows():
     })
 
 df_resumen_fases = pd.DataFrame(resumen_fases)
-# Si el avance financiero supera al físico por más de 10 pts, la fase gasta más rápido de lo que avanza.
 df_resumen_fases["Alerta"] = df_resumen_fases.apply(
     lambda r: "🔴" if r["% Avance Financiero"] - r["% Avance Físico"] > 10 else "🟢", axis=1
 )
@@ -401,18 +484,17 @@ st.dataframe(
 )
 st.caption("🔴 = el gasto avanza más de 10 puntos por encima del avance físico (posible sobrecosto o adelanto de compras).")
 
-# Gráfica comparativa por fase
 df_chart = pd.DataFrame({
     "Fase": [f.split(":")[0] for f in df_resumen_fases["Fase de Obra"]],
     "Presupuesto": df_resumen_fases["Total Presupuestado"].values,
     "Real": df_resumen_fases["Total Real Fase"].values,
 }).set_index("Fase")
-st.bar_chart(df_chart, **({"width": "stretch"} if _ver >= (1, 46) else {"use_container_width": True}))
+st.bar_chart(df_chart, **FULL_WIDTH)
 
 st.markdown("---")
 
 # ---------------------------------------------------------------
-# VISTA 4: BITÁCORAS (GASTOS Y PAGOS) CON ELIMINACIÓN Y EXPORTACIÓN
+# VISTA 4: BITÁCORAS (GASTOS Y PAGOS)
 # ---------------------------------------------------------------
 st.subheader("📜 Bitácoras del Proyecto")
 
@@ -420,61 +502,105 @@ tab_gastos, tab_pagos = st.tabs(["Gastos y destajos", "Pagos del cliente"])
 
 with tab_gastos:
     if df_gastos.empty:
-        st.info("Aún no se han registrado gastos en el panel lateral.")
+        st.info("Aún no se han registrado gastos.")
     else:
-        df_editor = df_gastos.copy()
-        df_editor.insert(0, "Eliminar", False)
-        editado = st.data_editor(
-            df_editor,
-            column_config={
-                "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca los registros erróneos"),
-                "id": st.column_config.NumberColumn("Folio", disabled=True),
-                "monto": st.column_config.NumberColumn("Monto", format="$%.2f", disabled=True),
-            },
-            disabled=["fecha", "fase", "tipo", "proveedor", "descripcion"],
-            hide_index=True,
-            key="editor_gastos",
-            **FULL_WIDTH,
-        )
-        col_a, col_b = st.columns([1, 3])
-        with col_a:
-            if st.button("🗑️ Eliminar seleccionados", key="del_gastos"):
-                ids = editado.loc[editado["Eliminar"], "id"].tolist()
-                if ids:
-                    eliminar_registros("gastos", ids)
-                    st.rerun()
-                else:
-                    st.warning("No hay registros marcados.")
-        with col_b:
-            st.download_button(
-                "⬇️ Exportar bitácora a CSV",
-                df_gastos.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"bitacora_gastos_JE132_{datetime.now():%Y%m%d}.csv",
-                mime="text/csv",
+        df_vista = df_gastos.copy()
+        df_vista["comprobante"] = df_vista["comprobante"].apply(lambda c: "📎 Sí" if c else "—")
+
+        if ES_ADMIN:
+            df_vista.insert(0, "Eliminar", False)
+            editado = st.data_editor(
+                df_vista,
+                column_config={
+                    "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca los registros erróneos"),
+                    "id": st.column_config.NumberColumn("Folio", disabled=True),
+                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", disabled=True),
+                    "comprobante": st.column_config.TextColumn("Comprobante", disabled=True),
+                },
+                disabled=["fecha", "fase", "tipo", "proveedor", "descripcion"],
+                hide_index=True,
+                key="editor_gastos",
+                **FULL_WIDTH,
             )
+            col_a, col_b = st.columns([1, 3])
+            with col_a:
+                if st.button("🗑️ Eliminar seleccionados", key="del_gastos"):
+                    ids = editado.loc[editado["Eliminar"], "id"].tolist()
+                    if ids:
+                        eliminar_gastos(ids)
+                        st.rerun()
+                    else:
+                        st.warning("No hay registros marcados.")
+            with col_b:
+                st.download_button(
+                    "⬇️ Exportar bitácora a CSV",
+                    df_gastos.drop(columns=["comprobante"]).to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"bitacora_gastos_JE132_{datetime.now():%Y%m%d}.csv",
+                    mime="text/csv",
+                )
+        else:
+            st.dataframe(
+                df_vista.rename(columns={"id": "Folio", "monto": "Monto", "comprobante": "Comprobante"})
+                .style.format({"Monto": "${:,.2f}"}),
+                hide_index=True,
+                **FULL_WIDTH,
+            )
+
+        # --- Visor de comprobantes (ambos roles) ---
+        con_comprobante = df_gastos[df_gastos["comprobante"].notna() & (df_gastos["comprobante"] != "")]
+        if not con_comprobante.empty:
+            with st.expander("🔍 Ver comprobante de un gasto"):
+                opciones = {
+                    f"Folio {r['id']} | {r['fecha']} | ${r['monto']:,.2f} | {r['descripcion'][:40]}": r
+                    for _, r in con_comprobante.iterrows()
+                }
+                seleccion = st.selectbox("Selecciona el gasto:", list(opciones.keys()))
+                registro = opciones[seleccion]
+                ruta = COMPROBANTES_DIR / registro["comprobante"]
+                if not ruta.exists():
+                    st.error("El archivo del comprobante no se encontró en el almacenamiento.")
+                elif ruta.suffix.lower() in EXTENSIONES_IMAGEN:
+                    st.image(str(ruta), caption=f"Comprobante del folio {registro['id']}", **FULL_WIDTH)
+                    st.download_button(
+                        "⬇️ Descargar imagen", ruta.read_bytes(),
+                        file_name=ruta.name, key=f"dl_{registro['id']}",
+                    )
+                else:
+                    st.download_button(
+                        "⬇️ Descargar comprobante PDF", ruta.read_bytes(),
+                        file_name=ruta.name, mime="application/pdf", key=f"dl_{registro['id']}",
+                    )
 
 with tab_pagos:
     if df_pagos.empty:
-        st.info("Registra el anticipo y las estimaciones cobradas en el panel lateral.")
+        st.info("Aún no hay pagos del cliente registrados.")
     else:
-        df_editor_p = df_pagos.copy()
-        df_editor_p.insert(0, "Eliminar", False)
-        editado_p = st.data_editor(
-            df_editor_p,
-            column_config={
-                "Eliminar": st.column_config.CheckboxColumn("Eliminar"),
-                "id": st.column_config.NumberColumn("Folio", disabled=True),
-                "monto": st.column_config.NumberColumn("Monto", format="$%.2f", disabled=True),
-            },
-            disabled=["fecha", "concepto"],
-            hide_index=True,
-            key="editor_pagos",
-            **FULL_WIDTH,
-        )
-        if st.button("🗑️ Eliminar seleccionados", key="del_pagos"):
-            ids = editado_p.loc[editado_p["Eliminar"], "id"].tolist()
-            if ids:
-                eliminar_registros("pagos_cliente", ids)
-                st.rerun()
-            else:
-                st.warning("No hay registros marcados.")
+        if ES_ADMIN:
+            df_editor_p = df_pagos.copy()
+            df_editor_p.insert(0, "Eliminar", False)
+            editado_p = st.data_editor(
+                df_editor_p,
+                column_config={
+                    "Eliminar": st.column_config.CheckboxColumn("Eliminar"),
+                    "id": st.column_config.NumberColumn("Folio", disabled=True),
+                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", disabled=True),
+                },
+                disabled=["fecha", "concepto"],
+                hide_index=True,
+                key="editor_pagos",
+                **FULL_WIDTH,
+            )
+            if st.button("🗑️ Eliminar seleccionados", key="del_pagos"):
+                ids = editado_p.loc[editado_p["Eliminar"], "id"].tolist()
+                if ids:
+                    eliminar_pagos(ids)
+                    st.rerun()
+                else:
+                    st.warning("No hay registros marcados.")
+        else:
+            st.dataframe(
+                df_pagos.rename(columns={"id": "Folio", "monto": "Monto"})
+                .style.format({"Monto": "${:,.2f}"}),
+                hide_index=True,
+                **FULL_WIDTH,
+            )
