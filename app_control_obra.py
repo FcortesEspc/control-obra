@@ -785,3 +785,126 @@ with col_xls:
         st.caption("Hojas separadas: Resumen, Desglose, Fases, Gastos y Pagos.")
     except ImportError:
         st.error("Falta la librería openpyxl. Agrega 'openpyxl' al requirements.txt.")
+
+# ---------------------------------------------------------------
+# VISTA 6: ADMINISTRACIÓN DE LA BASE DE DATOS (SOLO ADMIN)
+# ---------------------------------------------------------------
+if ES_ADMIN:
+    st.markdown("---")
+    st.subheader("🗄️ Administración de la Base de Datos")
+    st.caption(
+        "La base de datos vive en el volume persistente de Railway. Desde aquí puedes "
+        "respaldarla, explorarla, consultarla con SQL y restaurarla."
+    )
+
+    tab_resp, tab_expl, tab_sql, tab_rest = st.tabs(
+        ["💾 Respaldo", "🔎 Explorador", "⌨️ Consola SQL", "♻️ Restaurar"]
+    )
+
+    # --- Respaldo ---
+    with tab_resp:
+        # Consolidar el WAL para que el archivo .db contenga todos los datos al copiarse
+        with get_conn() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            n_gastos = conn.execute("SELECT COUNT(*) FROM gastos").fetchone()[0]
+            n_pagos = conn.execute("SELECT COUNT(*) FROM pagos_cliente").fetchone()[0]
+
+        tam_db = DB_PATH.stat().st_size / 1024
+        archivos_comp = list(COMPROBANTES_DIR.glob("*")) if COMPROBANTES_DIR.exists() else []
+        tam_comp = sum(f.stat().st_size for f in archivos_comp) / 1024
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Registros", f"{n_gastos} gastos / {n_pagos} pagos")
+        c2.metric("Base de datos", f"{tam_db:,.0f} KB")
+        c3.metric("Comprobantes", f"{len(archivos_comp)} archivos ({tam_comp:,.0f} KB)")
+
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            st.download_button(
+                "💾 Descargar base de datos (.db)",
+                DB_PATH.read_bytes(),
+                file_name=f"respaldo_JE132_{datetime.now():%Y%m%d_%H%M}.db",
+                mime="application/octet-stream",
+                **FULL_WIDTH,
+            )
+            st.caption("Solo los datos. Se abre con cualquier visor de SQLite.")
+        with col_r2:
+            import io
+            import zipfile
+
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(DB_PATH, DB_PATH.name)
+                for f in archivos_comp:
+                    zf.write(f, f"comprobantes/{f.name}")
+            st.download_button(
+                "📦 Descargar respaldo completo (.zip)",
+                zip_buf.getvalue(),
+                file_name=f"respaldo_completo_JE132_{datetime.now():%Y%m%d_%H%M}.zip",
+                mime="application/zip",
+                **FULL_WIDTH,
+            )
+            st.caption("Datos + comprobantes. Recomendado como respaldo mensual.")
+
+    # --- Explorador de tablas ---
+    with tab_expl:
+        with get_conn() as conn:
+            tablas = [
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchall()
+            ]
+        tabla_sel = st.selectbox("Tabla:", tablas)
+        with get_conn() as conn:
+            df_tabla = pd.read_sql_query(f"SELECT * FROM {tabla_sel}", conn)  # noqa: S608 (nombre validado contra sqlite_master)
+        st.dataframe(df_tabla, hide_index=True, **FULL_WIDTH)
+        st.caption(f"{len(df_tabla)} registros en '{tabla_sel}'.")
+
+    # --- Consola SQL (solo lectura) ---
+    with tab_sql:
+        st.caption("Solo consultas SELECT. La conexión se abre en modo lectura, así que no puede modificar datos.")
+        consulta = st.text_area(
+            "Consulta SQL:",
+            value="SELECT fase, tipo, SUM(monto) AS total\nFROM gastos\nGROUP BY fase, tipo\nORDER BY total DESC;",
+            height=120,
+        )
+        if st.button("▶️ Ejecutar consulta"):
+            limpia = consulta.strip().rstrip(";").strip()
+            if not limpia.lower().startswith("select"):
+                st.error("Solo se permiten consultas SELECT.")
+            elif ";" in limpia:
+                st.error("Solo se permite una consulta a la vez.")
+            else:
+                try:
+                    conn_ro = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+                    df_q = pd.read_sql_query(limpia, conn_ro)
+                    conn_ro.close()
+                    st.dataframe(df_q, hide_index=True, **FULL_WIDTH)
+                    st.caption(f"{len(df_q)} resultados.")
+                except Exception as e:
+                    st.error(f"Error en la consulta: {e}")
+
+    # --- Restaurar desde respaldo ---
+    with tab_rest:
+        st.warning(
+            "⚠️ Restaurar reemplaza TODOS los datos actuales por los del respaldo. "
+            "Antes de reemplazar, se guarda automáticamente una copia de seguridad de la base actual."
+        )
+        archivo_db = st.file_uploader("Archivo de respaldo (.db):", type=["db"])
+        confirmar = st.checkbox("Entiendo que los datos actuales serán reemplazados.")
+        if st.button("♻️ Restaurar base de datos", disabled=archivo_db is None or not confirmar):
+            contenido = archivo_db.getvalue()
+            if not contenido.startswith(b"SQLite format 3\x00"):
+                st.error("El archivo no es una base de datos SQLite válida.")
+            else:
+                # Copia de seguridad de la base actual antes de reemplazar
+                with get_conn() as conn:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                copia = DB_DIR / f"pre_restauracion_{datetime.now():%Y%m%d_%H%M%S}.db"
+                copia.write_bytes(DB_PATH.read_bytes())
+                # Eliminar archivos WAL/SHM viejos y escribir la nueva base
+                for sufijo in ("-wal", "-shm"):
+                    Path(str(DB_PATH) + sufijo).unlink(missing_ok=True)
+                DB_PATH.write_bytes(contenido)
+                st.success(f"Base restaurada. Copia de seguridad previa guardada como {copia.name}.")
+                st.rerun()
