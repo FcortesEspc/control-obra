@@ -43,6 +43,65 @@ FASE_INDIRECTOS = "Gastos Indirectos"
 TIPOS_DIRECTOS = ["Materiales", "Mano de Obra"]
 EXTENSIONES_IMAGEN = {".jpg", ".jpeg", ".png", ".webp"}
 
+# --- Catálogo de materiales (compras) ---
+UNIDADES = ["pza", "m", "m2", "m3", "ml", "kg", "ton", "saco", "bulto", "lt", "cubeta",
+            "rollo", "hoja", "tramo", "caja", "juego", "lote", "viaje", "día"]
+CATEGORIAS = ["Material de construcción", "Renta de madera y cimbra", "Instalaciones", "Acarreos y otros"]
+
+# Catálogo precargado. Se guarda en la base de datos la primera vez y desde la app
+# se pueden agregar materiales nuevos que quedan disponibles para futuras requisiciones.
+CATALOGO_BASE = [
+    # --- Material de construcción ---
+    ("Arena", "m3", "Material de construcción"),
+    ("Grava 3/4\"", "m3", "Material de construcción"),
+    ("Grava 1/2\"", "m3", "Material de construcción"),
+    ("Piedra braza", "m3", "Material de construcción"),
+    ("Block de cemento macizo 12x20x40 cm", "pza", "Material de construcción"),
+    ("Block de cemento hueco 15x20x40 cm", "pza", "Material de construcción"),
+    ("Tabique rojo recocido", "pza", "Material de construcción"),
+    ("Varilla 3/8\" AR-42", "pza", "Material de construcción"),
+    ("Varilla 1/2\" AR-42", "pza", "Material de construcción"),
+    ("Varilla 5/8\" AR-42", "pza", "Material de construcción"),
+    ("Anillos de 1/4\" (alambrón) 20x20", "kg", "Material de construcción"),
+    ("Anillos de 1/4\" (alambrón) 15x15", "kg", "Material de construcción"),
+    ("Castillo armado 10x10 (Armex)", "pza", "Material de construcción"),
+    ("Castillo armado 10x15 (Armex)", "pza", "Material de construcción"),
+    ("Castillo armado 15x15 (Armex)", "pza", "Material de construcción"),
+    ("Alambre recocido", "kg", "Material de construcción"),
+    ("Clavo de 2 1/2\"", "kg", "Material de construcción"),
+    ("Clavo de 4\"", "kg", "Material de construcción"),
+    ("Cemento gris (bulto 50 kg)", "bulto", "Material de construcción"),
+    ("Cemento blanco (bulto)", "bulto", "Material de construcción"),
+    ("Cal hidratada (bulto 25 kg)", "bulto", "Material de construcción"),
+    ("Mortero (bulto 50 kg)", "bulto", "Material de construcción"),
+    ("Yeso (bulto 40 kg)", "bulto", "Material de construcción"),
+    ("Malla electrosoldada 6-6/10-10", "rollo", "Material de construcción"),
+    ("Impermeabilizante acrílico", "cubeta", "Material de construcción"),
+    ("Adhesivo para block / pegapiso", "bulto", "Material de construcción"),
+    ("Aditivo / acelerante para concreto", "lt", "Material de construcción"),
+    # --- Renta de madera y cimbra ---
+    ("Tarima de 0.50 x 1.00 m", "pza", "Renta de madera y cimbra"),
+    ("Tramo de polín (0.80 a 1.00 m)", "pza", "Renta de madera y cimbra"),
+    ("Polín de 2.50 m de largo", "pza", "Renta de madera y cimbra"),
+    ("Tabla de 30 cm x 3/4\"", "pza", "Renta de madera y cimbra"),
+    ("Barrote", "pza", "Renta de madera y cimbra"),
+    ("Triplay 16 mm", "hoja", "Renta de madera y cimbra"),
+    ("Puntal metálico", "pza", "Renta de madera y cimbra"),
+    # --- Instalaciones ---
+    ("Tubo PVC sanitario 4\"", "tramo", "Instalaciones"),
+    ("Tubo PVC sanitario 2\"", "tramo", "Instalaciones"),
+    ("Tubo CPVC 1/2\"", "tramo", "Instalaciones"),
+    ("Poliducto 1/2\"", "rollo", "Instalaciones"),
+    ("Cable THW calibre 12", "rollo", "Instalaciones"),
+    ("Chalupa / caja eléctrica", "pza", "Instalaciones"),
+    ("Conexiones y codos (juego)", "juego", "Instalaciones"),
+    # --- Acarreos y otros ---
+    ("Flete / acarreo de material", "viaje", "Acarreos y otros"),
+    ("Retiro de escombro", "viaje", "Acarreos y otros"),
+    ("Renta de revolvedora", "día", "Acarreos y otros"),
+    ("Renta de vibrador para concreto", "día", "Acarreos y otros"),
+]
+
 # Compatibilidad de ancho entre versiones de Streamlit (>=1.46 usa width="stretch")
 try:
     _ver = tuple(int(x) for x in st.__version__.split(".")[:2])
@@ -212,6 +271,31 @@ def init_db() -> None:
         columnas = [c[1] for c in conn.execute("PRAGMA table_info(gastos)").fetchall()]
         if "comprobante" not in columnas:
             conn.execute("ALTER TABLE gastos ADD COLUMN comprobante TEXT")
+        # Migración v5: formato de requisición (obra/ubicación, categoría y observaciones por partida)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS catalogo_materiales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                descripcion TEXT NOT NULL UNIQUE,
+                unidad TEXT NOT NULL,
+                categoria TEXT NOT NULL
+            )
+            """
+        )
+        cols_req = [c[1] for c in conn.execute("PRAGMA table_info(requisiciones)").fetchall()]
+        if "obra" not in cols_req:
+            conn.execute("ALTER TABLE requisiciones ADD COLUMN obra TEXT")
+            conn.execute("ALTER TABLE requisiciones ADD COLUMN ubicacion TEXT")
+        cols_part = [c[1] for c in conn.execute("PRAGMA table_info(requisicion_partidas)").fetchall()]
+        if "categoria" not in cols_part:
+            conn.execute("ALTER TABLE requisicion_partidas ADD COLUMN categoria TEXT DEFAULT 'Material de construcción'")
+            conn.execute("ALTER TABLE requisicion_partidas ADD COLUMN observaciones TEXT")
+        # Sembrar el catálogo la primera vez
+        if conn.execute("SELECT COUNT(*) FROM catalogo_materiales").fetchone()[0] == 0:
+            conn.executemany(
+                "INSERT OR IGNORE INTO catalogo_materiales (descripcion, unidad, categoria) VALUES (?, ?, ?)",
+                CATALOGO_BASE,
+            )
 
 
 def leer_gastos() -> pd.DataFrame:
@@ -322,25 +406,49 @@ def actualizar_pagos(cambios: list[tuple]) -> None:
 
 
 # --- Requisiciones, cotizaciones y órdenes de compra ---
-def crear_requisicion(fecha: str, fase: str, solicitante: str, fecha_requerida: str, notas: str, partidas: list[dict]) -> int:
+def crear_requisicion(fecha: str, fase: str, solicitante: str, fecha_requerida: str, notas: str,
+                      partidas: list[dict], obra: str = "", ubicacion: str = "") -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO requisiciones (fecha, fase, solicitante, fecha_requerida, notas) VALUES (?, ?, ?, ?, ?)",
-            (fecha, fase, solicitante.strip(), fecha_requerida, notas.strip()),
+            "INSERT INTO requisiciones (fecha, fase, solicitante, fecha_requerida, notas, obra, ubicacion) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (fecha, fase, solicitante.strip(), fecha_requerida, notas.strip(), obra.strip(), ubicacion.strip()),
         )
         rid = cur.lastrowid
         conn.executemany(
-            "INSERT INTO requisicion_partidas (requisicion_id, cantidad, unidad, descripcion) VALUES (?, ?, ?, ?)",
-            [(rid, p["cantidad"], p["unidad"], p["descripcion"]) for p in partidas],
+            "INSERT INTO requisicion_partidas (requisicion_id, cantidad, unidad, descripcion, categoria, observaciones) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(rid, p["cantidad"], p["unidad"], p["descripcion"], p["categoria"], p.get("observaciones", ""))
+             for p in partidas],
         )
         return rid
+
+
+def leer_catalogo() -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            "SELECT id, descripcion, unidad, categoria FROM catalogo_materiales ORDER BY categoria, descripcion", conn
+        )
+
+
+def agregar_material_catalogo(descripcion: str, unidad: str, categoria: str) -> bool:
+    """Agrega un material al catálogo. Devuelve False si ya existía."""
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO catalogo_materiales (descripcion, unidad, categoria) VALUES (?, ?, ?)",
+                (descripcion.strip(), unidad, categoria),
+            )
+        return True
+    except sqlite3.IntegrityError:
+        return False
 
 
 def leer_requisiciones() -> pd.DataFrame:
     with get_conn() as conn:
         return pd.read_sql_query(
             """
-            SELECT r.id, r.fecha, r.fase, r.solicitante, r.fecha_requerida, r.notas,
+            SELECT r.id, r.fecha, r.fase, r.solicitante, r.fecha_requerida, r.notas, r.obra, r.ubicacion,
                    (SELECT COUNT(*) FROM requisicion_partidas p WHERE p.requisicion_id = r.id) AS partidas,
                    (SELECT COUNT(*) FROM cotizaciones c WHERE c.requisicion_id = r.id) AS cotizaciones,
                    (SELECT COUNT(*) FROM ordenes_compra o WHERE o.requisicion_id = r.id) AS ocs
@@ -353,7 +461,10 @@ def leer_requisiciones() -> pd.DataFrame:
 def leer_partidas(req_id: int) -> pd.DataFrame:
     with get_conn() as conn:
         return pd.read_sql_query(
-            "SELECT id, cantidad, unidad, descripcion FROM requisicion_partidas WHERE requisicion_id = ? ORDER BY id",
+            "SELECT id, cantidad, unidad, descripcion, "
+            "COALESCE(categoria, 'Material de construcción') AS categoria, "
+            "COALESCE(observaciones, '') AS observaciones "
+            "FROM requisicion_partidas WHERE requisicion_id = ? ORDER BY id",
             conn, params=(int(req_id),),
         )
 
@@ -552,7 +663,6 @@ saldo_caja = total_cobrado - total_real
 # ---------------------------------------------------------------
 # MÓDULO: REQUISICIONES, COTIZACIONES Y ÓRDENES DE COMPRA
 # ---------------------------------------------------------------
-UNIDADES = ["pza", "m", "m2", "m3", "ml", "kg", "ton", "saco", "bulto", "lt", "rollo", "caja", "lote", "viaje"]
 
 
 def _dinero(v: float) -> str:
@@ -594,40 +704,92 @@ def _pdf_estilos():
     }
 
 
+def _tabla_partidas_pdf(partidas: pd.DataFrame, estilos: dict, precios_map=None,
+                        subtotal: float | None = None, iva: float | None = None, total: float | None = None):
+    """Tabla estilo cuantificación: CONCEPTO|UNIDAD|CANTIDAD|P.U.|IMPORTE|OBSERVACIONES,
+    agrupada por categoría. Si precios_map es None, P.U. e IMPORTE van en blanco (para cotizar)."""
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, Table
+
+    e = estilos
+    filas = [["CONCEPTO", "UNIDAD", "CANTIDAD", "P.U.", "IMPORTE", "OBSERVACIONES"]]
+    estilos_extra = []
+    for categoria in CATEGORIAS:
+        grupo = partidas[partidas["categoria"] == categoria]
+        if grupo.empty:
+            continue
+        fila_seccion = len(filas)
+        filas.append([categoria.upper(), "", "", "", "", ""])
+        estilos_extra += [
+            ("SPAN", (0, fila_seccion), (-1, fila_seccion)),
+            ("BACKGROUND", (0, fila_seccion), (-1, fila_seccion), colors.HexColor("#dbe4ef")),
+            ("FONTNAME", (0, fila_seccion), (-1, fila_seccion), "Helvetica-Bold"),
+            ("ALIGN", (0, fila_seccion), (0, fila_seccion), "LEFT"),
+        ]
+        for _, p in grupo.iterrows():
+            if precios_map is not None:
+                pu = float(precios_map.get(p["id"], 0))
+                pu_txt, imp_txt = _dinero(pu), _dinero(pu * p["cantidad"])
+            else:
+                pu_txt, imp_txt = "$", "$"
+            filas.append([
+                Paragraph(p["descripcion"], e["chico"]), p["unidad"], f"{p['cantidad']:g}",
+                pu_txt, imp_txt, Paragraph(str(p["observaciones"] or ""), e["chico"]),
+            ])
+    if precios_map is not None and subtotal is not None:
+        filas.append(["", "", "", "SUBTOTAL", _dinero(subtotal), ""])
+        filas.append(["", "", "", "IVA", _dinero(iva or 0), ""])
+        filas.append(["", "", "", "TOTAL", _dinero(total or subtotal), ""])
+    else:
+        filas.append(["", "", "", "TOTAL", "$", ""])
+
+    t = Table(filas, colWidths=[6.6 * cm, 1.6 * cm, 1.9 * cm, 2.4 * cm, 2.6 * cm, 3.5 * cm], repeatRows=1)
+    t.setStyle(e["tabla"])
+    from reportlab.platypus import TableStyle
+    t.setStyle(TableStyle(estilos_extra + [("ALIGN", (0, 1), (0, -1), "LEFT")]))
+    return t
+
+
 def generar_pdf_solicitud_cotizacion(req: pd.Series) -> bytes:
-    """Formato de Solicitud de Cotización para enviar a proveedores."""
+    """Formato de Relación de Materiales / Solicitud de Cotización, estilo cuantificación de obra."""
     from io import BytesIO
 
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.units import cm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     partidas = leer_partidas(req["id"])
     e = _pdf_estilos()
     buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
-                            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=1.3 * cm, bottomMargin=1.3 * cm,
+                            leftMargin=1.2 * cm, rightMargin=1.2 * cm,
                             title=f"Solicitud de Cotización {folio_req(req['id'])}")
-    elems = [
-        Paragraph("Solicitud de Cotización de Materiales", e["titulo"]),
-        Paragraph(f"Folio: {folio_req(req['id'])} | Fecha de emisión: {req['fecha']}", e["normal"]),
-        Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", e["sub"]),
-        Paragraph("Contratistas: DACAM & HOGAR 911 | control.hogar911.com", e["sub"]),
-        Spacer(1, 8),
-        Paragraph(f"Etapa de obra: {req['fase']}", e["normal"]),
-        Paragraph(f"Solicita: {req['solicitante']} | Fecha requerida en obra: {req['fecha_requerida']}", e["normal"]),
-    ]
+
+    obra_txt = str(req.get("obra") or "").strip() or "Construcción Vivienda Familiar Tres Niveles (JE132)"
+    ubicacion_txt = str(req.get("ubicacion") or "").strip() or "—"
+
+    encabezado = Table([
+        ["RELACIÓN DE MATERIALES — SOLICITUD DE COTIZACIÓN", f"Folio: {folio_req(req['id'])}"],
+        [f"Obra: {obra_txt}", f"Fecha: {req['fecha']}"],
+        ["Propietario: José Manuel Robles Miguel", f"Requerido en obra: {req['fecha_requerida']}"],
+        [f"Ubicación: {ubicacion_txt}", f"Solicita: {req['solicitante']}"],
+        ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", f"Etapa: {req['fase'].split(':')[0]}"],
+    ], colWidths=[12.2 * cm, 6.4 * cm])
+    encabezado.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (0, 0), 12),
+        ("FONTSIZE", (1, 0), (1, 0), 10),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+    ]))
+    elems = [encabezado, Spacer(1, 6)]
     if str(req.get("notas") or "").strip():
         elems.append(Paragraph(f"Notas: {req['notas']}", e["normal"]))
-    elems.append(Paragraph("Materiales solicitados", e["h2"]))
+        elems.append(Spacer(1, 4))
 
-    filas = [["#", "Cantidad", "Unidad", "Descripción", "Precio Unitario", "Importe"]]
-    for i, (_, p) in enumerate(partidas.iterrows(), start=1):
-        filas.append([str(i), f"{p['cantidad']:g}", p["unidad"], Paragraph(p["descripcion"], e["chico"]), "$", "$"])
-    filas.append(["", "", "", "", "TOTAL", "$"])
-    t = Table(filas, colWidths=[0.9 * cm, 1.9 * cm, 1.7 * cm, 8.5 * cm, 2.8 * cm, 2.8 * cm], repeatRows=1)
-    t.setStyle(e["tabla"])
-    elems.append(t)
+    elems.append(_tabla_partidas_pdf(partidas, e))
     elems.append(Spacer(1, 10))
     elems.append(Paragraph(
         "Favor de cotizar indicando: precio unitario por partida, tiempo de entrega, "
@@ -663,23 +825,17 @@ def generar_pdf_orden_compra(oc, req: pd.Series) -> bytes:
         Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", e["sub"]),
         Paragraph("Emite: DACAM & HOGAR 911 | control.hogar911.com", e["sub"]),
         Spacer(1, 8),
+    ]
+    filas_datos = [
         Paragraph(f"Proveedor: {cot['proveedor']}", e["h2"]),
         Paragraph(f"Tiempo de entrega: {cot['tiempo_entrega'] or 'Por confirmar'} | "
                   f"Condiciones de pago: {cot['condiciones_pago'] or 'Por confirmar'}", e["normal"]),
         Paragraph(f"Entregar en obra. Etapa: {req['fase']} | Fecha requerida: {req['fecha_requerida']}", e["normal"]),
         Paragraph("Partidas", e["h2"]),
     ]
-    filas = [["#", "Cantidad", "Unidad", "Descripción", "P. Unitario", "Importe"]]
-    for i, (_, p) in enumerate(partidas.iterrows(), start=1):
-        pu = float(precios_cot.get(p["id"], 0))
-        filas.append([str(i), f"{p['cantidad']:g}", p["unidad"], Paragraph(p["descripcion"], e["chico"]),
-                      _dinero(pu), _dinero(pu * p["cantidad"])])
-    filas.append(["", "", "", "", "Subtotal", _dinero(oc["subtotal"])])
-    filas.append(["", "", "", "", "IVA", _dinero(oc["iva"])])
-    filas.append(["", "", "", "", "TOTAL", _dinero(oc["total"])])
-    t = Table(filas, colWidths=[0.9 * cm, 1.9 * cm, 1.7 * cm, 8.5 * cm, 2.8 * cm, 2.8 * cm], repeatRows=1)
-    t.setStyle(e["tabla"])
-    elems.append(t)
+    elems.extend(filas_datos)
+    elems.append(_tabla_partidas_pdf(partidas, e, precios_map=precios_cot,
+                                     subtotal=float(oc["subtotal"]), iva=float(oc["iva"]), total=float(oc["total"])))
     elems.append(Spacer(1, 24))
     firmas = Table([["_______________________", "_______________________"],
                     ["Autoriza\nDACAM & HOGAR 911", f"Acepta\n{cot['proveedor']}"]],
@@ -704,38 +860,103 @@ def seccion_requisiciones():
         if st.session_state.pop("msg_req", None):
             st.success(f"Requisición {st.session_state.pop('msg_req_folio', '')} guardada. "
                        "Genera el formato para proveedores desde la pestaña Seguimiento.")
+        if "req_items" not in st.session_state:
+            st.session_state.req_items = []
+        if "req_ver" not in st.session_state:
+            st.session_state.req_ver = 0
+
         c1, c2 = st.columns(2)
-        fase_req = c1.selectbox("Fase de obra:", FASES, key="req_fase")
-        fecha_requerida = c2.date_input("Fecha requerida en obra:", value=datetime.now().date(), key="req_fecha_req")
+        obra_req = c1.text_input("Obra:", value="Construcción Vivienda Familiar Tres Niveles (JE132)", key="req_obra")
+        ubicacion_req = c2.text_input("Ubicación (opcional):", key="req_ubicacion")
+        c3, c4 = st.columns(2)
+        fase_req = c3.selectbox("Fase de obra:", FASES, key="req_fase")
+        fecha_requerida = c4.date_input("Fecha requerida en obra:", value=datetime.now().date(), key="req_fecha_req")
         solicitante = st.text_input("Solicita (arquitecto / encargado de obra):", key="req_solicitante")
         notas_req = st.text_input("Notas para los proveedores (opcional):", key="req_notas")
 
-        st.markdown("**Partidas de material** — usa el ➕ al final de la tabla para agregar renglones:")
-        df_partidas_vacio = pd.DataFrame({
-            "Cantidad": pd.Series(dtype="float"),
-            "Unidad": pd.Series(dtype="str"),
-            "Descripción": pd.Series(dtype="str"),
-        })
+        st.markdown("**Partidas de material:**")
+        hueco_catalogo = st.container()  # el selector del catálogo se muestra arriba de la tabla
+
+        columnas_partidas = ["Cantidad", "Unidad", "Descripción", "Categoría", "Observaciones"]
+        df_items = pd.DataFrame(st.session_state.req_items, columns=columnas_partidas)
         partidas_edit = st.data_editor(
-            df_partidas_vacio,
+            df_items,
             num_rows="dynamic",
             column_config={
                 "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.01, required=True),
                 "Unidad": st.column_config.SelectboxColumn("Unidad", options=UNIDADES, required=True),
                 "Descripción": st.column_config.TextColumn("Descripción", required=True),
+                "Categoría": st.column_config.SelectboxColumn("Categoría", options=CATEGORIAS, required=True),
+                "Observaciones": st.column_config.TextColumn("Observaciones", help="Ej. P/ cimentación, P/ castillos y cadena"),
             },
             hide_index=True,
-            key="req_partidas",
+            key=f"req_partidas_{st.session_state.req_ver}",
             **FULL_WIDTH,
         )
+        st.caption("También puedes escribir partidas directamente en la tabla (➕ al final) si el material no está en el catálogo.")
+
+        def _filas_del_editor(df: pd.DataFrame) -> list[list]:
+            filas = []
+            for _, p in df.iterrows():
+                filas.append([
+                    float(p["Cantidad"]) if pd.notna(p["Cantidad"]) else None,
+                    p["Unidad"], p["Descripción"],
+                    p["Categoría"] if pd.notna(p["Categoría"]) else CATEGORIAS[0],
+                    p["Observaciones"] if pd.notna(p["Observaciones"]) else "",
+                ])
+            return filas
+
+        with hueco_catalogo:
+            df_catalogo = leer_catalogo()
+            cc1, cc2, cc3 = st.columns([3, 1, 1])
+            mat_sel = cc1.selectbox(
+                "Agregar material del catálogo:",
+                df_catalogo["id"].tolist(),
+                format_func=lambda i: f"{df_catalogo.set_index('id').loc[i, 'descripcion']} "
+                                      f"({df_catalogo.set_index('id').loc[i, 'unidad']})",
+                key="cat_sel",
+            )
+            cant_sel = cc2.number_input("Cantidad:", min_value=0.0, step=1.0, key="cat_cant")
+            cc3.markdown("<br>", unsafe_allow_html=True)
+            if cc3.button("➕ Agregar", key="btn_cat_add", **FULL_WIDTH):
+                if cant_sel <= 0:
+                    st.warning("Indica la cantidad.")
+                else:
+                    m = df_catalogo.set_index("id").loc[mat_sel]
+                    st.session_state.req_items = _filas_del_editor(partidas_edit) + [
+                        [float(cant_sel), m["unidad"], m["descripcion"], m["categoria"], ""]
+                    ]
+                    st.session_state.req_ver += 1
+                    st.rerun()
+
+            with st.expander("📚 Agregar un material nuevo al catálogo (queda guardado para siempre)"):
+                nc1, nc2, nc3 = st.columns([3, 1, 2])
+                nuevo_desc = nc1.text_input("Descripción del material:", key="nuevo_mat_desc")
+                nueva_unidad = nc2.selectbox("Unidad:", UNIDADES, key="nuevo_mat_unidad")
+                nueva_cat = nc3.selectbox("Categoría:", CATEGORIAS, key="nuevo_mat_cat")
+                if st.button("Guardar en el catálogo", key="btn_nuevo_mat"):
+                    if not nuevo_desc.strip():
+                        st.error("Escribe la descripción del material.")
+                    elif agregar_material_catalogo(nuevo_desc, nueva_unidad, nueva_cat):
+                        st.session_state.req_items = _filas_del_editor(partidas_edit)
+                        st.session_state.req_ver += 1
+                        st.success(f"'{nuevo_desc.strip()}' agregado al catálogo.")
+                        st.rerun()
+                    else:
+                        st.warning("Ese material ya existe en el catálogo.")
+
         if st.button("💾 Guardar requisición", key="btn_guardar_req"):
             partidas_validas = []
-            for _, p in partidas_edit.iterrows():
-                cant = float(p["Cantidad"] or 0)
-                unidad = str(p["Unidad"] or "").strip()
-                desc = str(p["Descripción"] or "").strip()
+            for fila in _filas_del_editor(partidas_edit):
+                cant = float(fila[0] or 0)
+                unidad = str(fila[1] or "").strip()
+                desc = str(fila[2] or "").strip()
                 if cant > 0 and unidad and desc:
-                    partidas_validas.append({"cantidad": cant, "unidad": unidad, "descripcion": desc})
+                    partidas_validas.append({
+                        "cantidad": cant, "unidad": unidad, "descripcion": desc,
+                        "categoria": str(fila[3] or CATEGORIAS[0]),
+                        "observaciones": str(fila[4] or "").strip(),
+                    })
             if not solicitante.strip():
                 st.error("Indica quién solicita el material.")
             elif not partidas_validas:
@@ -744,10 +965,12 @@ def seccion_requisiciones():
                 rid = crear_requisicion(
                     datetime.now().date().isoformat(), fase_req, solicitante,
                     fecha_requerida.isoformat(), notas_req, partidas_validas,
+                    obra=obra_req, ubicacion=ubicacion_req,
                 )
                 st.session_state["msg_req"] = True
                 st.session_state["msg_req_folio"] = folio_req(rid)
-                st.session_state.pop("req_partidas", None)
+                st.session_state.req_items = []
+                st.session_state.req_ver += 1
                 st.rerun()
 
     df_reqs = leer_requisiciones()
@@ -777,7 +1000,9 @@ def seccion_requisiciones():
             req_sel = df_reqs.set_index("id").loc[sel_seg]
             req_sel = pd.concat([pd.Series({"id": sel_seg}), req_sel])
             st.dataframe(
-                leer_partidas(sel_seg).rename(columns={"cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción"})
+                leer_partidas(sel_seg).rename(columns={
+                    "cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción",
+                    "categoria": "Categoría", "observaciones": "Observaciones"})
                 .drop(columns=["id"]),
                 hide_index=True, **FULL_WIDTH,
             )
@@ -823,7 +1048,8 @@ def seccion_requisiciones():
 
             partidas_cot = leer_partidas(sel_cot)
             df_precios = partidas_cot.rename(
-                columns={"cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción"})
+                columns={"cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción",
+                         "observaciones": "Observaciones"}).drop(columns=["categoria"])
             df_precios["Precio Unitario"] = 0.0
             precios_edit = st.data_editor(
                 df_precios,
@@ -832,6 +1058,7 @@ def seccion_requisiciones():
                     "Cantidad": st.column_config.NumberColumn(disabled=True),
                     "Unidad": st.column_config.TextColumn(disabled=True),
                     "Descripción": st.column_config.TextColumn(disabled=True),
+                    "Observaciones": st.column_config.TextColumn(disabled=True),
                     "Precio Unitario": st.column_config.NumberColumn("Precio Unitario", min_value=0.0, format="$%.2f"),
                 },
                 hide_index=True,
@@ -870,7 +1097,8 @@ def seccion_requisiciones():
             precios_comp = leer_precios_requisicion(sel_comp)
 
             # Tabla comparativa: partidas x proveedores (importes)
-            df_cmp = partidas_comp.rename(columns={"cantidad": "Cant.", "unidad": "Unidad", "descripcion": "Descripción"}).copy()
+            df_cmp = (partidas_comp.rename(columns={"cantidad": "Cant.", "unidad": "Unidad", "descripcion": "Descripción"})
+                      .drop(columns=["categoria", "observaciones"]).copy())
             columnas_prov = []
             totales = {}
             for _, c in cots_comp.iterrows():
