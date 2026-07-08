@@ -55,11 +55,14 @@ FULL_WIDTH = {"width": "stretch"} if _ver >= (1, 46) else {"use_container_width"
 # CONTROL DE ACCESO Y ROLES
 # ---------------------------------------------------------------
 def determinar_rol(pwd: str) -> str | None:
-    """Devuelve 'admin', 'cliente' o None según la contraseña ingresada."""
+    """Devuelve 'admin', 'residente', 'cliente' o None según la contraseña ingresada."""
     admin_pwd = os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD", "")
+    residente_pwd = os.environ.get("RESIDENTE_PASSWORD", "")
     cliente_pwd = os.environ.get("CLIENTE_PASSWORD", "")
     if admin_pwd and pwd == admin_pwd:
         return "admin"
+    if residente_pwd and pwd == residente_pwd:
+        return "residente"
     if cliente_pwd and pwd == cliente_pwd:
         return "cliente"
     return None
@@ -67,7 +70,8 @@ def determinar_rol(pwd: str) -> str | None:
 
 def verificar_acceso() -> bool:
     hay_passwords = bool(
-        os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")
+        os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
+        or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")
     )
     if not hay_passwords:
         st.session_state.rol = "admin"  # Modo local/desarrollo
@@ -95,6 +99,7 @@ if not verificar_acceso():
     st.stop()
 
 ES_ADMIN = st.session_state.get("rol") == "admin"
+ES_RESIDENTE = st.session_state.get("rol") == "residente"
 
 
 # ---------------------------------------------------------------
@@ -161,6 +166,45 @@ def init_db() -> None:
                 fase TEXT PRIMARY KEY,
                 porcentaje REAL NOT NULL DEFAULT 0,
                 actualizado TEXT
+            );
+            CREATE TABLE IF NOT EXISTS requisiciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha TEXT NOT NULL,
+                fase TEXT NOT NULL,
+                solicitante TEXT NOT NULL,
+                fecha_requerida TEXT,
+                notas TEXT
+            );
+            CREATE TABLE IF NOT EXISTS requisicion_partidas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                requisicion_id INTEGER NOT NULL,
+                cantidad REAL NOT NULL,
+                unidad TEXT NOT NULL,
+                descripcion TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS cotizaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                requisicion_id INTEGER NOT NULL,
+                proveedor TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                tiempo_entrega TEXT,
+                condiciones_pago TEXT
+            );
+            CREATE TABLE IF NOT EXISTS cotizacion_precios (
+                cotizacion_id INTEGER NOT NULL,
+                partida_id INTEGER NOT NULL,
+                precio_unitario REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (cotizacion_id, partida_id)
+            );
+            CREATE TABLE IF NOT EXISTS ordenes_compra (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                requisicion_id INTEGER NOT NULL,
+                cotizacion_id INTEGER NOT NULL,
+                fecha TEXT NOT NULL,
+                subtotal REAL NOT NULL,
+                iva REAL NOT NULL DEFAULT 0,
+                total REAL NOT NULL,
+                gasto_id INTEGER
             );
             """
         )
@@ -255,6 +299,133 @@ def eliminar_pagos(ids: list[int]) -> None:
         conn.executemany("DELETE FROM pagos_cliente WHERE id = ?", [(int(i),) for i in ids])
 
 
+def actualizar_gastos(cambios: list[tuple]) -> None:
+    """Cada cambio: (fecha, fase, tipo, monto, proveedor, descripcion, id)."""
+    if not cambios:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            "UPDATE gastos SET fecha=?, fase=?, tipo=?, monto=?, proveedor=?, descripcion=? WHERE id=?",
+            cambios,
+        )
+
+
+def actualizar_pagos(cambios: list[tuple]) -> None:
+    """Cada cambio: (fecha, concepto, monto, id)."""
+    if not cambios:
+        return
+    with get_conn() as conn:
+        conn.executemany(
+            "UPDATE pagos_cliente SET fecha=?, concepto=?, monto=? WHERE id=?",
+            cambios,
+        )
+
+
+# --- Requisiciones, cotizaciones y órdenes de compra ---
+def crear_requisicion(fecha: str, fase: str, solicitante: str, fecha_requerida: str, notas: str, partidas: list[dict]) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO requisiciones (fecha, fase, solicitante, fecha_requerida, notas) VALUES (?, ?, ?, ?, ?)",
+            (fecha, fase, solicitante.strip(), fecha_requerida, notas.strip()),
+        )
+        rid = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO requisicion_partidas (requisicion_id, cantidad, unidad, descripcion) VALUES (?, ?, ?, ?)",
+            [(rid, p["cantidad"], p["unidad"], p["descripcion"]) for p in partidas],
+        )
+        return rid
+
+
+def leer_requisiciones() -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT r.id, r.fecha, r.fase, r.solicitante, r.fecha_requerida, r.notas,
+                   (SELECT COUNT(*) FROM requisicion_partidas p WHERE p.requisicion_id = r.id) AS partidas,
+                   (SELECT COUNT(*) FROM cotizaciones c WHERE c.requisicion_id = r.id) AS cotizaciones,
+                   (SELECT COUNT(*) FROM ordenes_compra o WHERE o.requisicion_id = r.id) AS ocs
+            FROM requisiciones r ORDER BY r.id DESC
+            """,
+            conn,
+        )
+
+
+def leer_partidas(req_id: int) -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            "SELECT id, cantidad, unidad, descripcion FROM requisicion_partidas WHERE requisicion_id = ? ORDER BY id",
+            conn, params=(int(req_id),),
+        )
+
+
+def eliminar_requisicion(req_id: int) -> None:
+    with get_conn() as conn:
+        cot_ids = [r[0] for r in conn.execute("SELECT id FROM cotizaciones WHERE requisicion_id = ?", (int(req_id),))]
+        if cot_ids:
+            conn.executemany("DELETE FROM cotizacion_precios WHERE cotizacion_id = ?", [(c,) for c in cot_ids])
+        conn.execute("DELETE FROM cotizaciones WHERE requisicion_id = ?", (int(req_id),))
+        conn.execute("DELETE FROM requisicion_partidas WHERE requisicion_id = ?", (int(req_id),))
+        conn.execute("DELETE FROM requisiciones WHERE id = ?", (int(req_id),))
+
+
+def crear_cotizacion(req_id: int, proveedor: str, fecha: str, entrega: str, pago: str, precios: dict) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO cotizaciones (requisicion_id, proveedor, fecha, tiempo_entrega, condiciones_pago) VALUES (?, ?, ?, ?, ?)",
+            (int(req_id), proveedor.strip(), fecha, entrega.strip(), pago.strip()),
+        )
+        cid = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO cotizacion_precios (cotizacion_id, partida_id, precio_unitario) VALUES (?, ?, ?)",
+            [(cid, int(pid), float(pu)) for pid, pu in precios.items()],
+        )
+        return cid
+
+
+def leer_cotizaciones(req_id: int) -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            "SELECT id, proveedor, fecha, tiempo_entrega, condiciones_pago FROM cotizaciones WHERE requisicion_id = ? ORDER BY id",
+            conn, params=(int(req_id),),
+        )
+
+
+def leer_precios_requisicion(req_id: int) -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT cp.cotizacion_id, cp.partida_id, cp.precio_unitario
+            FROM cotizacion_precios cp
+            JOIN cotizaciones c ON c.id = cp.cotizacion_id
+            WHERE c.requisicion_id = ?
+            """,
+            conn, params=(int(req_id),),
+        )
+
+
+def crear_orden_compra(req_id: int, cot_id: int, fecha: str, subtotal: float, iva: float, total: float) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO ordenes_compra (requisicion_id, cotizacion_id, fecha, subtotal, iva, total) VALUES (?, ?, ?, ?, ?, ?)",
+            (int(req_id), int(cot_id), fecha, subtotal, iva, total),
+        )
+        return cur.lastrowid
+
+
+def leer_orden_compra(req_id: int):
+    with get_conn() as conn:
+        df = pd.read_sql_query(
+            "SELECT id, requisicion_id, cotizacion_id, fecha, subtotal, iva, total, gasto_id FROM ordenes_compra WHERE requisicion_id = ?",
+            conn, params=(int(req_id),),
+        )
+    return df.iloc[0] if not df.empty else None
+
+
+def vincular_gasto_oc(oc_id: int, gasto_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("UPDATE ordenes_compra SET gasto_id = ? WHERE id = ?", (int(gasto_id), int(oc_id)))
+
+
 def guardar_avance_fisico(avances: dict) -> None:
     ahora = datetime.now().isoformat(timespec="seconds")
     with get_conn() as conn:
@@ -279,9 +450,11 @@ st.caption("Cliente: José Manuel Robles Miguel | Contratistas: DACAM & HOGAR 91
 # ---------------------------------------------------------------
 # PANEL LATERAL
 # ---------------------------------------------------------------
-rol_texto = "👷 Administrador" if ES_ADMIN else "👤 Cliente (solo consulta)"
+rol_etiquetas = {"admin": "👷 Administrador", "residente": "📐 Residente de Obra", "cliente": "👤 Cliente (solo consulta)"}
+rol_texto = rol_etiquetas.get(st.session_state.get("rol", "admin"), "👷 Administrador")
 st.sidebar.markdown(f"**Sesión:** {rol_texto}")
-if os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD") or os.environ.get("CLIENTE_PASSWORD"):
+if (os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
+        or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")):
     if st.sidebar.button("Cerrar sesión"):
         st.session_state.pop("rol", None)
         st.session_state.pop("autenticado", None)
@@ -356,6 +529,8 @@ if ES_ADMIN:
             if st.form_submit_button("Guardar avance"):
                 guardar_avance_fisico({f: float(p) for f, p in nuevos_avances.items()})
                 st.success("Avance actualizado.")
+elif ES_RESIDENTE:
+    st.sidebar.info("Modo obra: levanta requisiciones de material, genera solicitudes de cotización y captura las cotizaciones de los proveedores.")
 else:
     st.sidebar.info("Estás en modo consulta. Puedes revisar el avance financiero, físico y los comprobantes del proyecto.")
 
@@ -373,6 +548,408 @@ total_real = real_materiales + real_mano_obra + real_indirectos
 
 total_cobrado = df_pagos["monto"].sum() if not df_pagos.empty else 0.0
 saldo_caja = total_cobrado - total_real
+
+# ---------------------------------------------------------------
+# MÓDULO: REQUISICIONES, COTIZACIONES Y ÓRDENES DE COMPRA
+# ---------------------------------------------------------------
+UNIDADES = ["pza", "m", "m2", "m3", "ml", "kg", "ton", "saco", "bulto", "lt", "rollo", "caja", "lote", "viaje"]
+
+
+def _dinero(v: float) -> str:
+    return f"${v:,.2f}"
+
+
+def folio_req(rid: int) -> str:
+    return f"REQ-{int(rid):03d}"
+
+
+def folio_oc_num(oid: int) -> str:
+    return f"OC-JE132-{int(oid):03d}"
+
+
+def _pdf_estilos():
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.platypus import TableStyle
+
+    styles = getSampleStyleSheet()
+    return {
+        "titulo": ParagraphStyle("titulo", parent=styles["Title"], fontSize=15, spaceAfter=2),
+        "normal": styles["Normal"],
+        "sub": ParagraphStyle("sub", parent=styles["Normal"], fontSize=9, textColor=colors.grey),
+        "h2": ParagraphStyle("h2", parent=styles["Heading2"], fontSize=11, spaceBefore=12, spaceAfter=4),
+        "chico": ParagraphStyle("chico", parent=styles["Normal"], fontSize=8),
+        "tabla": TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f5f9")]),
+            ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]),
+    }
+
+
+def generar_pdf_solicitud_cotizacion(req: pd.Series) -> bytes:
+    """Formato de Solicitud de Cotización para enviar a proveedores."""
+    from io import BytesIO
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table
+
+    partidas = leer_partidas(req["id"])
+    e = _pdf_estilos()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+                            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            title=f"Solicitud de Cotización {folio_req(req['id'])}")
+    elems = [
+        Paragraph("Solicitud de Cotización de Materiales", e["titulo"]),
+        Paragraph(f"Folio: {folio_req(req['id'])} | Fecha de emisión: {req['fecha']}", e["normal"]),
+        Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", e["sub"]),
+        Paragraph("Contratistas: DACAM & HOGAR 911 | control.hogar911.com", e["sub"]),
+        Spacer(1, 8),
+        Paragraph(f"Etapa de obra: {req['fase']}", e["normal"]),
+        Paragraph(f"Solicita: {req['solicitante']} | Fecha requerida en obra: {req['fecha_requerida']}", e["normal"]),
+    ]
+    if str(req.get("notas") or "").strip():
+        elems.append(Paragraph(f"Notas: {req['notas']}", e["normal"]))
+    elems.append(Paragraph("Materiales solicitados", e["h2"]))
+
+    filas = [["#", "Cantidad", "Unidad", "Descripción", "Precio Unitario", "Importe"]]
+    for i, (_, p) in enumerate(partidas.iterrows(), start=1):
+        filas.append([str(i), f"{p['cantidad']:g}", p["unidad"], Paragraph(p["descripcion"], e["chico"]), "$", "$"])
+    filas.append(["", "", "", "", "TOTAL", "$"])
+    t = Table(filas, colWidths=[0.9 * cm, 1.9 * cm, 1.7 * cm, 8.5 * cm, 2.8 * cm, 2.8 * cm], repeatRows=1)
+    t.setStyle(e["tabla"])
+    elems.append(t)
+    elems.append(Spacer(1, 10))
+    elems.append(Paragraph(
+        "Favor de cotizar indicando: precio unitario por partida, tiempo de entrega, "
+        "vigencia de la cotización, condiciones de pago y si los precios incluyen IVA y flete a obra.", e["normal"]))
+    elems.append(Spacer(1, 6))
+    elems.append(Paragraph(f"Documento generado el {datetime.now():%d/%m/%Y %H:%M}.", e["chico"]))
+    doc.build(elems)
+    return buf.getvalue()
+
+
+def generar_pdf_orden_compra(oc, req: pd.Series) -> bytes:
+    """Orden de Compra formal para el proveedor seleccionado."""
+    from io import BytesIO
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table
+
+    partidas = leer_partidas(req["id"])
+    cots = leer_cotizaciones(req["id"])
+    cot = cots[cots["id"] == oc["cotizacion_id"]].iloc[0]
+    precios = leer_precios_requisicion(req["id"])
+    precios_cot = precios[precios["cotizacion_id"] == oc["cotizacion_id"]].set_index("partida_id")["precio_unitario"]
+
+    e = _pdf_estilos()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+                            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            title=f"Orden de Compra {folio_oc_num(oc['id'])}")
+    elems = [
+        Paragraph("ORDEN DE COMPRA", e["titulo"]),
+        Paragraph(f"Folio: {folio_oc_num(oc['id'])} | Fecha: {oc['fecha']} | Ref: {folio_req(req['id'])}", e["normal"]),
+        Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", e["sub"]),
+        Paragraph("Emite: DACAM & HOGAR 911 | control.hogar911.com", e["sub"]),
+        Spacer(1, 8),
+        Paragraph(f"Proveedor: {cot['proveedor']}", e["h2"]),
+        Paragraph(f"Tiempo de entrega: {cot['tiempo_entrega'] or 'Por confirmar'} | "
+                  f"Condiciones de pago: {cot['condiciones_pago'] or 'Por confirmar'}", e["normal"]),
+        Paragraph(f"Entregar en obra. Etapa: {req['fase']} | Fecha requerida: {req['fecha_requerida']}", e["normal"]),
+        Paragraph("Partidas", e["h2"]),
+    ]
+    filas = [["#", "Cantidad", "Unidad", "Descripción", "P. Unitario", "Importe"]]
+    for i, (_, p) in enumerate(partidas.iterrows(), start=1):
+        pu = float(precios_cot.get(p["id"], 0))
+        filas.append([str(i), f"{p['cantidad']:g}", p["unidad"], Paragraph(p["descripcion"], e["chico"]),
+                      _dinero(pu), _dinero(pu * p["cantidad"])])
+    filas.append(["", "", "", "", "Subtotal", _dinero(oc["subtotal"])])
+    filas.append(["", "", "", "", "IVA", _dinero(oc["iva"])])
+    filas.append(["", "", "", "", "TOTAL", _dinero(oc["total"])])
+    t = Table(filas, colWidths=[0.9 * cm, 1.9 * cm, 1.7 * cm, 8.5 * cm, 2.8 * cm, 2.8 * cm], repeatRows=1)
+    t.setStyle(e["tabla"])
+    elems.append(t)
+    elems.append(Spacer(1, 24))
+    firmas = Table([["_______________________", "_______________________"],
+                    ["Autoriza\nDACAM & HOGAR 911", f"Acepta\n{cot['proveedor']}"]],
+                   colWidths=[8.5 * cm, 8.5 * cm])
+    elems.append(firmas)
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph(f"Documento generado el {datetime.now():%d/%m/%Y %H:%M}.", e["chico"]))
+    doc.build(elems)
+    return buf.getvalue()
+
+
+def seccion_requisiciones():
+    st.markdown("---")
+    st.subheader("🧾 Requisiciones de Material y Compras")
+
+    t_nueva, t_seg, t_cot, t_comp = st.tabs([
+        "➕ Nueva requisición", "📋 Seguimiento", "💰 Capturar cotización", "⚖️ Comparativo y Orden de Compra",
+    ])
+
+    # ------ NUEVA REQUISICIÓN ------
+    with t_nueva:
+        if st.session_state.pop("msg_req", None):
+            st.success(f"Requisición {st.session_state.pop('msg_req_folio', '')} guardada. "
+                       "Genera el formato para proveedores desde la pestaña Seguimiento.")
+        c1, c2 = st.columns(2)
+        fase_req = c1.selectbox("Fase de obra:", FASES, key="req_fase")
+        fecha_requerida = c2.date_input("Fecha requerida en obra:", value=datetime.now().date(), key="req_fecha_req")
+        solicitante = st.text_input("Solicita (arquitecto / encargado de obra):", key="req_solicitante")
+        notas_req = st.text_input("Notas para los proveedores (opcional):", key="req_notas")
+
+        st.markdown("**Partidas de material** — usa el ➕ al final de la tabla para agregar renglones:")
+        df_partidas_vacio = pd.DataFrame({
+            "Cantidad": pd.Series(dtype="float"),
+            "Unidad": pd.Series(dtype="str"),
+            "Descripción": pd.Series(dtype="str"),
+        })
+        partidas_edit = st.data_editor(
+            df_partidas_vacio,
+            num_rows="dynamic",
+            column_config={
+                "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.01, required=True),
+                "Unidad": st.column_config.SelectboxColumn("Unidad", options=UNIDADES, required=True),
+                "Descripción": st.column_config.TextColumn("Descripción", required=True),
+            },
+            hide_index=True,
+            key="req_partidas",
+            **FULL_WIDTH,
+        )
+        if st.button("💾 Guardar requisición", key="btn_guardar_req"):
+            partidas_validas = []
+            for _, p in partidas_edit.iterrows():
+                cant = float(p["Cantidad"] or 0)
+                unidad = str(p["Unidad"] or "").strip()
+                desc = str(p["Descripción"] or "").strip()
+                if cant > 0 and unidad and desc:
+                    partidas_validas.append({"cantidad": cant, "unidad": unidad, "descripcion": desc})
+            if not solicitante.strip():
+                st.error("Indica quién solicita el material.")
+            elif not partidas_validas:
+                st.error("Agrega al menos una partida completa (cantidad, unidad y descripción).")
+            else:
+                rid = crear_requisicion(
+                    datetime.now().date().isoformat(), fase_req, solicitante,
+                    fecha_requerida.isoformat(), notas_req, partidas_validas,
+                )
+                st.session_state["msg_req"] = True
+                st.session_state["msg_req_folio"] = folio_req(rid)
+                st.session_state.pop("req_partidas", None)
+                st.rerun()
+
+    df_reqs = leer_requisiciones()
+
+    # ------ SEGUIMIENTO ------
+    with t_seg:
+        if df_reqs.empty:
+            st.info("Aún no hay requisiciones registradas.")
+        else:
+            df_seg = df_reqs.copy()
+            df_seg["Folio"] = df_seg["id"].apply(folio_req)
+            df_seg["Estatus"] = df_seg.apply(
+                lambda r: "🟣 OC generada" if r["ocs"] > 0
+                else ("🔵 Cotizada" if r["cotizaciones"] > 0 else "🟠 Pendiente de cotizar"), axis=1)
+            st.dataframe(
+                df_seg[["Folio", "fecha", "fase", "solicitante", "fecha_requerida", "partidas", "cotizaciones", "Estatus"]]
+                .rename(columns={"fecha": "Fecha", "fase": "Fase", "solicitante": "Solicita",
+                                 "fecha_requerida": "Requerido", "partidas": "Partidas", "cotizaciones": "Cotizaciones"}),
+                hide_index=True, **FULL_WIDTH,
+            )
+            sel_seg = st.selectbox(
+                "Ver detalle de la requisición:",
+                df_reqs["id"].tolist(),
+                format_func=lambda i: f"{folio_req(i)} | {df_reqs.set_index('id').loc[i, 'fase']}",
+                key="seg_sel",
+            )
+            req_sel = df_reqs.set_index("id").loc[sel_seg]
+            req_sel = pd.concat([pd.Series({"id": sel_seg}), req_sel])
+            st.dataframe(
+                leer_partidas(sel_seg).rename(columns={"cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción"})
+                .drop(columns=["id"]),
+                hide_index=True, **FULL_WIDTH,
+            )
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                try:
+                    st.download_button(
+                        "📄 Formato de Solicitud de Cotización (PDF)",
+                        generar_pdf_solicitud_cotizacion(req_sel),
+                        file_name=f"solicitud_cotizacion_{folio_req(sel_seg)}.pdf",
+                        mime="application/pdf",
+                        key=f"rfq_{sel_seg}",
+                        **FULL_WIDTH,
+                    )
+                    st.caption("Envíaselo a cada proveedor para que coticen sobre las mismas partidas.")
+                except ImportError:
+                    st.error("Falta la librería reportlab en requirements.txt.")
+            with col_s2:
+                if ES_ADMIN and req_sel["ocs"] == 0:
+                    if st.button("🗑️ Eliminar requisición", key=f"del_req_{sel_seg}"):
+                        eliminar_requisicion(sel_seg)
+                        st.rerun()
+
+    # ------ CAPTURAR COTIZACIÓN ------
+    with t_cot:
+        if df_reqs.empty:
+            st.info("Primero levanta una requisición.")
+        else:
+            if st.session_state.pop("msg_cot", None):
+                st.success("Cotización guardada. Revísala en la pestaña de Comparativo.")
+            sel_cot = st.selectbox(
+                "Requisición a cotizar:",
+                df_reqs["id"].tolist(),
+                format_func=lambda i: f"{folio_req(i)} | {df_reqs.set_index('id').loc[i, 'fase']}",
+                key="cot_sel",
+            )
+            c1, c2 = st.columns(2)
+            proveedor_cot = c1.text_input("Proveedor:", key="cot_proveedor")
+            fecha_cot = c2.date_input("Fecha de la cotización:", value=datetime.now().date(), key="cot_fecha")
+            c3, c4 = st.columns(2)
+            entrega_cot = c3.text_input("Tiempo de entrega (Ej. 3 días hábiles):", key="cot_entrega")
+            pago_cot = c4.text_input("Condiciones de pago (Ej. Contado, 50% anticipo):", key="cot_pago")
+
+            partidas_cot = leer_partidas(sel_cot)
+            df_precios = partidas_cot.rename(
+                columns={"cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción"})
+            df_precios["Precio Unitario"] = 0.0
+            precios_edit = st.data_editor(
+                df_precios,
+                column_config={
+                    "id": None,
+                    "Cantidad": st.column_config.NumberColumn(disabled=True),
+                    "Unidad": st.column_config.TextColumn(disabled=True),
+                    "Descripción": st.column_config.TextColumn(disabled=True),
+                    "Precio Unitario": st.column_config.NumberColumn("Precio Unitario", min_value=0.0, format="$%.2f"),
+                },
+                hide_index=True,
+                key=f"cot_precios_{sel_cot}",
+                **FULL_WIDTH,
+            )
+            if st.button("💾 Guardar cotización", key="btn_guardar_cot"):
+                precios = {int(r["id"]): float(r["Precio Unitario"] or 0) for _, r in precios_edit.iterrows()}
+                if not proveedor_cot.strip():
+                    st.error("Indica el nombre del proveedor.")
+                elif not any(v > 0 for v in precios.values()):
+                    st.error("Captura al menos un precio unitario mayor a 0.")
+                else:
+                    crear_cotizacion(sel_cot, proveedor_cot, fecha_cot.isoformat(), entrega_cot, pago_cot, precios)
+                    st.session_state["msg_cot"] = True
+                    st.session_state.pop(f"cot_precios_{sel_cot}", None)
+                    st.rerun()
+
+    # ------ COMPARATIVO Y ORDEN DE COMPRA ------
+    with t_comp:
+        reqs_con_cot = df_reqs[df_reqs["cotizaciones"] > 0] if not df_reqs.empty else pd.DataFrame()
+        if reqs_con_cot.empty:
+            st.info("Aún no hay requisiciones con cotizaciones capturadas.")
+        else:
+            sel_comp = st.selectbox(
+                "Requisición:",
+                reqs_con_cot["id"].tolist(),
+                format_func=lambda i: f"{folio_req(i)} | {reqs_con_cot.set_index('id').loc[i, 'fase']} "
+                                      f"({reqs_con_cot.set_index('id').loc[i, 'cotizaciones']} cotizaciones)",
+                key="comp_sel",
+            )
+            req_comp = df_reqs.set_index("id").loc[sel_comp]
+            req_comp = pd.concat([pd.Series({"id": sel_comp}), req_comp])
+            partidas_comp = leer_partidas(sel_comp)
+            cots_comp = leer_cotizaciones(sel_comp)
+            precios_comp = leer_precios_requisicion(sel_comp)
+
+            # Tabla comparativa: partidas x proveedores (importes)
+            df_cmp = partidas_comp.rename(columns={"cantidad": "Cant.", "unidad": "Unidad", "descripcion": "Descripción"}).copy()
+            columnas_prov = []
+            totales = {}
+            for _, c in cots_comp.iterrows():
+                pu_map = precios_comp[precios_comp["cotizacion_id"] == c["id"]].set_index("partida_id")["precio_unitario"]
+                col = c["proveedor"]
+                df_cmp[col] = df_cmp.apply(lambda r: float(pu_map.get(r["id"], 0)) * r["Cant."], axis=1)
+                columnas_prov.append(col)
+                totales[col] = df_cmp[col].sum()
+            df_cmp = df_cmp.drop(columns=["id"])
+
+            st.markdown("**Comparativo de importes por proveedor** (verde = mejor precio por partida):")
+            fila_total = {"Cant.": None, "Unidad": "", "Descripción": "TOTAL"}
+            fila_total.update(totales)
+            df_cmp_total = pd.concat([df_cmp, pd.DataFrame([fila_total])], ignore_index=True)
+            st.dataframe(
+                df_cmp_total.style
+                .format({c: "${:,.2f}" for c in columnas_prov} | {"Cant.": "{:g}"}, na_rep="")
+                .highlight_min(axis=1, subset=columnas_prov, props="background-color: #d4efdf; font-weight: bold;"),
+                hide_index=True, **FULL_WIDTH,
+            )
+            st.dataframe(
+                cots_comp.rename(columns={"proveedor": "Proveedor", "fecha": "Fecha",
+                                          "tiempo_entrega": "Entrega", "condiciones_pago": "Cond. de pago"})
+                .drop(columns=["id"]),
+                hide_index=True, **FULL_WIDTH,
+            )
+
+            oc_existente = leer_orden_compra(sel_comp)
+            if oc_existente is not None:
+                cot_ganadora = cots_comp[cots_comp["id"] == oc_existente["cotizacion_id"]].iloc[0]
+                st.success(
+                    f"✅ Orden de compra {folio_oc_num(oc_existente['id'])} generada para "
+                    f"**{cot_ganadora['proveedor']}** por {_dinero(oc_existente['total'])}"
+                    + (f" — ligada al gasto folio {int(oc_existente['gasto_id'])}." if pd.notna(oc_existente["gasto_id"]) else ".")
+                )
+                try:
+                    st.download_button(
+                        "📄 Descargar Orden de Compra (PDF)",
+                        generar_pdf_orden_compra(oc_existente, req_comp),
+                        file_name=f"{folio_oc_num(oc_existente['id'])}.pdf",
+                        mime="application/pdf",
+                        key=f"oc_pdf_{sel_comp}",
+                    )
+                except ImportError:
+                    st.error("Falta la librería reportlab en requirements.txt.")
+            elif ES_ADMIN:
+                st.markdown("**Generar Orden de Compra:**")
+                c1, c2, c3 = st.columns([2, 1, 1])
+                ganador = c1.selectbox(
+                    "Proveedor seleccionado:",
+                    cots_comp["id"].tolist(),
+                    format_func=lambda i: f"{cots_comp.set_index('id').loc[i, 'proveedor']} ({_dinero(totales.get(cots_comp.set_index('id').loc[i, 'proveedor'], 0))})",
+                    key="oc_ganador",
+                )
+                con_iva = c2.checkbox("Agregar IVA 16%", value=True, key="oc_iva")
+                registrar_gasto = c3.checkbox("Registrar como gasto", value=True, key="oc_gasto",
+                                              help="Crea automáticamente el gasto de Materiales en la fase de la requisición.")
+                if st.button("🧾 Generar Orden de Compra", key="btn_oc"):
+                    prov_nombre = cots_comp.set_index("id").loc[ganador, "proveedor"]
+                    subtotal = float(totales.get(prov_nombre, 0))
+                    iva = round(subtotal * 0.16, 2) if con_iva else 0.0
+                    total_oc = round(subtotal + iva, 2)
+                    oc_id = crear_orden_compra(sel_comp, ganador, datetime.now().date().isoformat(), subtotal, iva, total_oc)
+                    if registrar_gasto:
+                        gid = insertar_gasto(
+                            datetime.now().date().isoformat(), req_comp["fase"], "Materiales",
+                            total_oc, prov_nombre,
+                            f"{folio_oc_num(oc_id)} — Materiales {folio_req(sel_comp)} ({len(partidas_comp)} partidas)",
+                        )
+                        vincular_gasto_oc(oc_id, gid)
+                    st.rerun()
+            else:
+                st.info("La orden de compra la genera el administrador a partir de este comparativo.")
+
+
+if ES_ADMIN or ES_RESIDENTE:
+    seccion_requisiciones()
+if ES_RESIDENTE:
+    st.stop()
 
 # ---------------------------------------------------------------
 # VISTA 1: DASHBOARD GENERAL
@@ -508,22 +1085,73 @@ with tab_gastos:
         df_vista["comprobante"] = df_vista["comprobante"].apply(lambda c: "📎 Sí" if c else "—")
 
         if ES_ADMIN:
-            df_vista.insert(0, "Eliminar", False)
+            if st.session_state.pop("msg_gastos", None):
+                st.success("Cambios guardados en la bitácora de gastos.")
+
+            df_edicion = df_gastos.copy()
+            df_edicion["fecha"] = pd.to_datetime(df_edicion["fecha"]).dt.date
+            df_edicion["proveedor"] = df_edicion["proveedor"].fillna("")
+            df_edicion["comprobante"] = df_edicion["comprobante"].apply(lambda c: "📎 Sí" if c else "—")
+            df_edicion.insert(0, "Eliminar", False)
+
             editado = st.data_editor(
-                df_vista,
+                df_edicion,
                 column_config={
-                    "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca los registros erróneos"),
+                    "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca los registros a borrar"),
                     "id": st.column_config.NumberColumn("Folio", disabled=True),
-                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", disabled=True),
+                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="YYYY-MM-DD"),
+                    "fase": st.column_config.SelectboxColumn("Fase", options=FASES + [FASE_INDIRECTOS], required=True),
+                    "tipo": st.column_config.SelectboxColumn("Tipo", options=TIPOS_DIRECTOS + [FASE_INDIRECTOS], required=True),
+                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", min_value=0.01, required=True),
+                    "proveedor": st.column_config.TextColumn("Proveedor"),
+                    "descripcion": st.column_config.TextColumn("Descripción", required=True),
                     "comprobante": st.column_config.TextColumn("Comprobante", disabled=True),
                 },
-                disabled=["fecha", "fase", "tipo", "proveedor", "descripcion"],
+                disabled=["id", "comprobante"],
+                num_rows="fixed",
                 hide_index=True,
                 key="editor_gastos",
                 **FULL_WIDTH,
             )
-            col_a, col_b = st.columns([1, 3])
+            st.caption("✏️ Haz doble clic en cualquier celda para corregirla y luego pulsa «Guardar cambios». Los gastos nuevos se capturan en el panel lateral.")
+
+            col_a, col_b, col_c = st.columns([1, 1, 2])
             with col_a:
+                if st.button("💾 Guardar cambios", key="save_gastos"):
+                    errores, cambios = [], []
+                    originales = df_gastos.set_index("id")
+                    for _, r in editado.iterrows():
+                        gid = int(r["id"])
+                        fase_n, tipo_n = r["fase"], r["tipo"]
+                        desc_n = str(r["descripcion"] or "").strip()
+                        prov_n = str(r["proveedor"] or "").strip()
+                        monto_n = float(r["monto"] or 0)
+                        if fase_n == FASE_INDIRECTOS and tipo_n != FASE_INDIRECTOS:
+                            errores.append(f"Folio {gid}: si la fase es '{FASE_INDIRECTOS}', el tipo debe ser '{FASE_INDIRECTOS}'.")
+                            continue
+                        if fase_n != FASE_INDIRECTOS and tipo_n == FASE_INDIRECTOS:
+                            errores.append(f"Folio {gid}: el tipo '{FASE_INDIRECTOS}' solo aplica a la fase '{FASE_INDIRECTOS}'.")
+                            continue
+                        if monto_n <= 0:
+                            errores.append(f"Folio {gid}: el monto debe ser mayor a 0.")
+                            continue
+                        if not desc_n:
+                            errores.append(f"Folio {gid}: la descripción no puede quedar vacía.")
+                            continue
+                        o = originales.loc[gid]
+                        nuevo = (r["fecha"].isoformat(), fase_n, tipo_n, monto_n, prov_n, desc_n)
+                        original = (str(o["fecha"]), o["fase"], o["tipo"], float(o["monto"]), str(o["proveedor"] or "").strip(), str(o["descripcion"]))
+                        if nuevo != original:
+                            cambios.append((*nuevo, gid))
+                    if errores:
+                        st.error("No se guardó nada. Corrige lo siguiente:\n\n- " + "\n- ".join(errores))
+                    elif cambios:
+                        actualizar_gastos(cambios)
+                        st.session_state["msg_gastos"] = True
+                        st.rerun()
+                    else:
+                        st.info("No hay cambios que guardar.")
+            with col_b:
                 if st.button("🗑️ Eliminar seleccionados", key="del_gastos"):
                     ids = editado.loc[editado["Eliminar"], "id"].tolist()
                     if ids:
@@ -531,7 +1159,7 @@ with tab_gastos:
                         st.rerun()
                     else:
                         st.warning("No hay registros marcados.")
-            with col_b:
+            with col_c:
                 st.download_button(
                     "⬇️ Exportar bitácora a CSV",
                     df_gastos.drop(columns=["comprobante"]).to_csv(index=False).encode("utf-8-sig"),
@@ -576,27 +1204,65 @@ with tab_pagos:
         st.info("Aún no hay pagos del cliente registrados.")
     else:
         if ES_ADMIN:
+            if st.session_state.pop("msg_pagos", None):
+                st.success("Cambios guardados en los pagos del cliente.")
+
             df_editor_p = df_pagos.copy()
+            df_editor_p["fecha"] = pd.to_datetime(df_editor_p["fecha"]).dt.date
             df_editor_p.insert(0, "Eliminar", False)
             editado_p = st.data_editor(
                 df_editor_p,
                 column_config={
                     "Eliminar": st.column_config.CheckboxColumn("Eliminar"),
                     "id": st.column_config.NumberColumn("Folio", disabled=True),
-                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", disabled=True),
+                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="YYYY-MM-DD"),
+                    "concepto": st.column_config.TextColumn("Concepto", required=True),
+                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", min_value=0.01, required=True),
                 },
-                disabled=["fecha", "concepto"],
+                disabled=["id"],
+                num_rows="fixed",
                 hide_index=True,
                 key="editor_pagos",
                 **FULL_WIDTH,
             )
-            if st.button("🗑️ Eliminar seleccionados", key="del_pagos"):
-                ids = editado_p.loc[editado_p["Eliminar"], "id"].tolist()
-                if ids:
-                    eliminar_pagos(ids)
-                    st.rerun()
-                else:
-                    st.warning("No hay registros marcados.")
+            st.caption("✏️ Doble clic en una celda para corregirla y luego «Guardar cambios».")
+
+            col_p1, col_p2 = st.columns([1, 3])
+            with col_p1:
+                if st.button("💾 Guardar cambios", key="save_pagos"):
+                    errores_p, cambios_p = [], []
+                    originales_p = df_pagos.set_index("id")
+                    for _, r in editado_p.iterrows():
+                        pid = int(r["id"])
+                        concepto_n = str(r["concepto"] or "").strip()
+                        monto_n = float(r["monto"] or 0)
+                        if monto_n <= 0:
+                            errores_p.append(f"Folio {pid}: el monto debe ser mayor a 0.")
+                            continue
+                        if not concepto_n:
+                            errores_p.append(f"Folio {pid}: el concepto no puede quedar vacío.")
+                            continue
+                        o = originales_p.loc[pid]
+                        nuevo = (r["fecha"].isoformat(), concepto_n, monto_n)
+                        original = (str(o["fecha"]), str(o["concepto"]), float(o["monto"]))
+                        if nuevo != original:
+                            cambios_p.append((*nuevo, pid))
+                    if errores_p:
+                        st.error("No se guardó nada. Corrige lo siguiente:\n\n- " + "\n- ".join(errores_p))
+                    elif cambios_p:
+                        actualizar_pagos(cambios_p)
+                        st.session_state["msg_pagos"] = True
+                        st.rerun()
+                    else:
+                        st.info("No hay cambios que guardar.")
+            with col_p2:
+                if st.button("🗑️ Eliminar seleccionados", key="del_pagos"):
+                    ids = editado_p.loc[editado_p["Eliminar"], "id"].tolist()
+                    if ids:
+                        eliminar_pagos(ids)
+                        st.rerun()
+                    else:
+                        st.warning("No hay registros marcados.")
         else:
             st.dataframe(
                 df_pagos.rename(columns={"id": "Folio", "monto": "Monto"})
