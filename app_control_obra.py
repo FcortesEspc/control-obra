@@ -277,6 +277,22 @@ def init_db() -> None:
         columnas = [c[1] for c in conn.execute("PRAGMA table_info(gastos)").fetchall()]
         if "comprobante" not in columnas:
             conn.execute("ALTER TABLE gastos ADD COLUMN comprobante TEXT")
+        # Migración v6: informes de avance de obra
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS informes_avance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha TEXT NOT NULL,
+                periodo TEXT NOT NULL,
+                elaboro TEXT NOT NULL,
+                avances TEXT NOT NULL,
+                trabajos_corto TEXT,
+                trabajos_mediano TEXT,
+                observaciones TEXT,
+                avance_json TEXT
+            )
+            """
+        )
         # Migración v5: formato de requisición (obra/ubicación, categoría y observaciones por partida)
         conn.execute(
             """
@@ -1215,9 +1231,219 @@ def seccion_requisiciones():
                 st.info("La orden de compra la genera el administrador a partir de este comparativo.")
 
 
+# ---------------------------------------------------------------
+# INFORMES DE AVANCE DE OBRA
+# ---------------------------------------------------------------
+def crear_informe_avance(fecha: str, periodo: str, elaboro: str, avances: str,
+                         corto: str, mediano: str, observaciones: str) -> int:
+    import json
+    snapshot = json.dumps(leer_avance_fisico())  # foto del avance físico al momento del informe
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO informes_avance (fecha, periodo, elaboro, avances, trabajos_corto, "
+            "trabajos_mediano, observaciones, avance_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (fecha, periodo.strip(), elaboro.strip(), avances.strip(),
+             corto.strip(), mediano.strip(), observaciones.strip(), snapshot),
+        )
+        return cur.lastrowid
+
+
+def leer_informes_avance() -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            "SELECT id, fecha, periodo, elaboro FROM informes_avance ORDER BY id DESC", conn
+        )
+
+
+def leer_informe_avance(inf_id: int) -> pd.Series:
+    with get_conn() as conn:
+        df = pd.read_sql_query("SELECT * FROM informes_avance WHERE id = ?", conn, params=(int(inf_id),))
+    return df.iloc[0]
+
+
+def eliminar_informe_avance(inf_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM informes_avance WHERE id = ?", (int(inf_id),))
+
+
+def folio_inf(inf_id: int) -> str:
+    return f"INF-{int(inf_id):03d}"
+
+
+def _parrafo_multilinea(texto: str, estilo):
+    """Convierte texto con saltos de línea en un Paragraph de reportlab."""
+    from xml.sax.saxutils import escape
+
+    from reportlab.platypus import Paragraph
+
+    limpio = escape(str(texto or "").strip()).replace("\n", "<br/>")
+    return Paragraph(limpio if limpio else "—", estilo)
+
+
+def generar_pdf_informe_avance(inf: pd.Series) -> bytes:
+    """Informe de Avance de Obra con membrete: avance físico, trabajos realizados y por realizar."""
+    import json
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    e = _pdf_estilos()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
+                            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            title=f"Informe de Avance {folio_inf(inf['id'])}")
+
+    encabezado = Table([
+        ["INFORME DE AVANCE DE OBRA", f"Folio: {folio_inf(inf['id'])}"],
+        ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", f"Fecha: {inf['fecha']}"],
+        ["Cliente: José Manuel Robles Miguel", f"Periodo: {inf['periodo']}"],
+        ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", f"Elaboró: {inf['elaboro']}"],
+    ], colWidths=[12.2 * cm, 6.4 * cm])
+    encabezado.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (0, 0), 13),
+        ("FONTSIZE", (1, 0), (1, 0), 10),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+    ]))
+    elems = [encabezado, Spacer(1, 8)]
+
+    # 1. Avance físico (foto al momento en que se elaboró el informe)
+    elems.append(Paragraph("1. Avance físico por fase", e["h2"]))
+    snapshot = json.loads(inf.get("avance_json") or "{}")
+    filas_av = [["Fase de Obra", "% Avance Físico"]]
+    for fase in FASES:
+        filas_av.append([Paragraph(fase, e["chico"]), f"{snapshot.get(fase, 0):.0f}%"])
+    t_av = Table(filas_av, colWidths=[13 * cm, 4 * cm])
+    t_av.setStyle(e["tabla"])
+    elems.append(t_av)
+    elems.append(Paragraph("Avance registrado a la fecha de elaboración del informe.", e["chico"]))
+
+    # 2-4. Secciones descriptivas
+    elems.append(Paragraph("2. Trabajos realizados en el periodo", e["h2"]))
+    elems.append(_parrafo_multilinea(inf["avances"], e["normal"]))
+    elems.append(Paragraph("3. Trabajos a realizar a corto plazo", e["h2"]))
+    elems.append(_parrafo_multilinea(inf["trabajos_corto"], e["normal"]))
+    elems.append(Paragraph("4. Trabajos a realizar a mediano plazo", e["h2"]))
+    elems.append(_parrafo_multilinea(inf["trabajos_mediano"], e["normal"]))
+    if str(inf.get("observaciones") or "").strip():
+        elems.append(Paragraph("5. Observaciones", e["h2"]))
+        elems.append(_parrafo_multilinea(inf["observaciones"], e["normal"]))
+
+    # Firmas
+    elems.append(Spacer(1, 34))
+    t_firmas = Table([
+        ["_______________________", "_______________________", "_______________________"],
+        [f"Elaboró\n{inf['elaboro']}", "Vo. Bo.\nDACAM & HOGAR 911", "Recibió\nCliente"],
+    ], colWidths=[6 * cm, 6 * cm, 6 * cm])
+    t_firmas.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("FONTSIZE", (0, 1), (-1, 1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    elems.append(t_firmas)
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph(f"Documento generado el {datetime.now():%d/%m/%Y %H:%M}.", e["chico"]))
+
+    doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+    return buf.getvalue()
+
+
+def seccion_informes_avance(puede_editar: bool):
+    st.markdown("---")
+    st.subheader("📝 Informes de Avance de Obra")
+
+    if puede_editar:
+        if st.session_state.pop("msg_inf_avance", None):
+            st.success(f"Informe {st.session_state.pop('msg_inf_folio', '')} guardado. "
+                       "Ya puedes descargarlo en PDF más abajo.")
+        with st.expander("➕ Redactar nuevo informe de avance"):
+            with st.form("form_inf_avance", clear_on_submit=True):
+                ci1, ci2 = st.columns(2)
+                periodo_inf = ci1.text_input("Periodo que reporta:",
+                                             placeholder="Ej. Semana del 6 al 12 de julio de 2026")
+                elaboro_inf = ci2.text_input("Elaboró:", placeholder="Ej. Arq. responsable / residente")
+                txt_avances = st.text_area(
+                    "Trabajos realizados / avances del periodo:", height=140,
+                    placeholder="- Colado de losa de entrepiso eje 1-4\n- Levantamiento de muros planta alta al 60%\n- Recepción de material de la REQ-003",
+                )
+                txt_corto = st.text_area(
+                    "Trabajos a realizar a corto plazo (próximas 1-2 semanas):", height=110,
+                    placeholder="- Cimbrado y colado de losa de azotea\n- Inicio de instalaciones hidráulicas PB",
+                )
+                txt_mediano = st.text_area(
+                    "Trabajos a realizar a mediano plazo (3-6 semanas):", height=110,
+                    placeholder="- Repellados y yesos en muros interiores\n- Pérgola de azotea",
+                )
+                txt_obs = st.text_area("Observaciones (opcional):", height=80,
+                                       placeholder="Ej. Se requiere definir acabados de fachada con el cliente.")
+                if st.form_submit_button("💾 Guardar informe"):
+                    if not periodo_inf.strip() or not elaboro_inf.strip():
+                        st.error("Indica el periodo que reporta y quién elabora el informe.")
+                    elif not txt_avances.strip():
+                        st.error("Describe los trabajos realizados en el periodo.")
+                    else:
+                        nid = crear_informe_avance(
+                            datetime.now().date().isoformat(), periodo_inf, elaboro_inf,
+                            txt_avances, txt_corto, txt_mediano, txt_obs,
+                        )
+                        st.session_state["msg_inf_avance"] = True
+                        st.session_state["msg_inf_folio"] = folio_inf(nid)
+                        st.rerun()
+
+    df_inf = leer_informes_avance()
+    if df_inf.empty:
+        st.info("Aún no hay informes de avance registrados." +
+                (" Redacta el primero en el panel de arriba." if puede_editar else ""))
+        return
+
+    opciones_inf = {
+        f"{folio_inf(r['id'])} | {r['fecha']} | {r['periodo']}": int(r["id"])
+        for _, r in df_inf.iterrows()
+    }
+    sel_inf = st.selectbox("Consultar informe:", list(opciones_inf.keys()), key="sel_inf_avance")
+    inf = leer_informe_avance(opciones_inf[sel_inf])
+
+    cib1, cib2 = st.columns([1, 3])
+    with cib1:
+        st.download_button(
+            "📄 Descargar Informe de Avance (PDF)",
+            generar_pdf_informe_avance(inf),
+            file_name=f"informe_avance_{folio_inf(inf['id'])}_JE132.pdf",
+            mime="application/pdf",
+            key=f"dl_inf_{inf['id']}",
+        )
+    if puede_editar:
+        with cib2:
+            if st.button("🗑️ Eliminar este informe", key=f"del_inf_{inf['id']}"):
+                eliminar_informe_avance(inf["id"])
+                st.rerun()
+
+    st.markdown(f"**Periodo:** {inf['periodo']} &nbsp;|&nbsp; **Elaboró:** {inf['elaboro']} "
+                f"&nbsp;|&nbsp; **Fecha:** {inf['fecha']}")
+    vc1, vc2, vc3 = st.columns(3)
+    with vc1:
+        st.markdown("**✅ Trabajos realizados:**")
+        st.write(inf["avances"])
+    with vc2:
+        st.markdown("**⏭️ Corto plazo:**")
+        st.write(inf["trabajos_corto"] or "—")
+    with vc3:
+        st.markdown("**📅 Mediano plazo:**")
+        st.write(inf["trabajos_mediano"] or "—")
+    if str(inf.get("observaciones") or "").strip():
+        st.markdown("**📌 Observaciones:**")
+        st.write(inf["observaciones"])
+
+
 if ES_ADMIN or ES_RESIDENTE:
     seccion_requisiciones()
 if ES_RESIDENTE:
+    seccion_informes_avance(puede_editar=True)
     st.stop()
 
 # ---------------------------------------------------------------
@@ -1721,6 +1947,11 @@ with col_xls:
         st.caption("Hojas separadas: Resumen, Desglose, Fases, Gastos y Pagos.")
     except ImportError:
         st.error("Falta la librería openpyxl. Agrega 'openpyxl' al requirements.txt.")
+
+# ---------------------------------------------------------------
+# VISTA: INFORMES DE AVANCE DE OBRA (admin redacta, cliente consulta)
+# ---------------------------------------------------------------
+seccion_informes_avance(puede_editar=ES_ADMIN)
 
 # ---------------------------------------------------------------
 # VISTA 6: ADMINISTRACIÓN DE LA BASE DE DATOS (SOLO ADMIN)
