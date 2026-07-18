@@ -545,6 +545,48 @@ def crear_orden_compra(req_id: int, cot_id: int, fecha: str, subtotal: float, iv
         return cur.lastrowid
 
 
+def leer_precios_cotizacion(cot_id: int) -> dict:
+    """Precios unitarios capturados de una cotización: {partida_id: precio}."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT partida_id, precio_unitario FROM cotizacion_precios WHERE cotizacion_id = ?",
+            (int(cot_id),),
+        ).fetchall()
+    return {int(p): float(v) for p, v in rows}
+
+
+def actualizar_cotizacion(cot_id: int, proveedor: str, fecha: str, entrega: str, pago: str, precios: dict) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE cotizaciones SET proveedor=?, fecha=?, tiempo_entrega=?, condiciones_pago=? WHERE id=?",
+            (proveedor.strip(), fecha, entrega.strip(), pago.strip(), int(cot_id)),
+        )
+        conn.executemany(
+            "INSERT OR REPLACE INTO cotizacion_precios (cotizacion_id, partida_id, precio_unitario) VALUES (?, ?, ?)",
+            [(int(cot_id), int(pid), float(pu)) for pid, pu in precios.items()],
+        )
+
+
+def cotizacion_oc(cot_id: int):
+    """Devuelve la orden de compra ligada a la cotización, o None si no tiene."""
+    with get_conn() as conn:
+        df = pd.read_sql_query(
+            "SELECT id, gasto_id FROM ordenes_compra WHERE cotizacion_id = ?", conn, params=(int(cot_id),)
+        )
+    return df.iloc[0] if not df.empty else None
+
+
+def eliminar_cotizacion(cot_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM cotizacion_precios WHERE cotizacion_id = ?", (int(cot_id),))
+        conn.execute("DELETE FROM cotizaciones WHERE id = ?", (int(cot_id),))
+
+
+def eliminar_orden_compra(oc_id: int) -> None:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM ordenes_compra WHERE id = ?", (int(oc_id),))
+
+
 def leer_orden_compra(req_id: int):
     with get_conn() as conn:
         df = pd.read_sql_query(
@@ -1134,6 +1176,91 @@ def seccion_requisiciones():
                     st.session_state.pop(f"cot_precios_{sel_cot}", None)
                     st.rerun()
 
+            # ------ EDITAR O ELIMINAR UNA COTIZACIÓN CAPTURADA ------
+            st.markdown("---")
+            with st.expander("✏️ Editar o eliminar una cotización capturada"):
+                if st.session_state.pop("msg_cot_edit", None):
+                    st.success("Cotización corregida.")
+                if st.session_state.pop("msg_cot_borrada", None):
+                    st.success("Cotización eliminada.")
+                cots_edit = leer_cotizaciones(sel_cot)
+                if cots_edit.empty:
+                    st.info("La requisición seleccionada arriba aún no tiene cotizaciones capturadas.")
+                else:
+                    sel_cot_edit = st.selectbox(
+                        "Cotización a corregir:",
+                        cots_edit["id"].tolist(),
+                        format_func=lambda i: f"{cots_edit.set_index('id').loc[i, 'proveedor']} | "
+                                              f"{cots_edit.set_index('id').loc[i, 'fecha']}",
+                        key=f"cot_edit_sel_{sel_cot}",
+                    )
+                    oc_ligada = cotizacion_oc(sel_cot_edit)
+                    if oc_ligada is not None:
+                        st.warning(
+                            f"⚠️ Esta cotización ya generó la orden de compra {folio_oc_num(oc_ligada['id'])}, "
+                            "por lo que está bloqueada para no desincronizar el documento emitido. "
+                            "Para corregirla, primero elimina la orden de compra en la pestaña "
+                            "«⚖️ Comparativo y Orden de Compra» (solo administrador) y vuelve aquí."
+                        )
+                    else:
+                        datos_cot = cots_edit.set_index("id").loc[sel_cot_edit]
+                        ec1, ec2 = st.columns(2)
+                        prov_e = ec1.text_input("Proveedor:", value=str(datos_cot["proveedor"]),
+                                                key=f"e_prov_{sel_cot_edit}")
+                        fecha_e = ec2.date_input("Fecha de la cotización:",
+                                                 value=pd.to_datetime(datos_cot["fecha"]).date(),
+                                                 key=f"e_fecha_{sel_cot_edit}")
+                        ec3, ec4 = st.columns(2)
+                        entrega_e = ec3.text_input("Tiempo de entrega:",
+                                                   value=str(datos_cot["tiempo_entrega"] or ""),
+                                                   key=f"e_ent_{sel_cot_edit}")
+                        pago_e = ec4.text_input("Condiciones de pago:",
+                                                value=str(datos_cot["condiciones_pago"] or ""),
+                                                key=f"e_pago_{sel_cot_edit}")
+
+                        precios_act = leer_precios_cotizacion(sel_cot_edit)
+                        df_pe = leer_partidas(sel_cot).rename(
+                            columns={"cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción",
+                                     "observaciones": "Observaciones"}).drop(columns=["categoria"])
+                        df_pe["Precio Unitario"] = df_pe["id"].map(lambda i: precios_act.get(int(i), 0.0))
+                        pe_edit = st.data_editor(
+                            df_pe,
+                            column_config={
+                                "id": None,
+                                "Cantidad": st.column_config.NumberColumn(disabled=True),
+                                "Unidad": st.column_config.TextColumn(disabled=True),
+                                "Descripción": st.column_config.TextColumn(disabled=True),
+                                "Observaciones": st.column_config.TextColumn(disabled=True),
+                                "Precio Unitario": st.column_config.NumberColumn(
+                                    "Precio Unitario", min_value=0.0, format="$%.2f"),
+                            },
+                            hide_index=True,
+                            key=f"e_precios_{sel_cot_edit}",
+                            **FULL_WIDTH,
+                        )
+                        ce1, ce2 = st.columns([1, 2])
+                        with ce1:
+                            if st.button("💾 Guardar corrección", key=f"btn_e_save_{sel_cot_edit}"):
+                                precios_n = {int(r["id"]): float(r["Precio Unitario"] or 0)
+                                             for _, r in pe_edit.iterrows()}
+                                if not prov_e.strip():
+                                    st.error("El proveedor no puede quedar vacío.")
+                                elif not any(v > 0 for v in precios_n.values()):
+                                    st.error("Captura al menos un precio unitario mayor a 0.")
+                                else:
+                                    actualizar_cotizacion(sel_cot_edit, prov_e, fecha_e.isoformat(),
+                                                          entrega_e, pago_e, precios_n)
+                                    st.session_state["msg_cot_edit"] = True
+                                    st.rerun()
+                        with ce2:
+                            conf_del = st.checkbox("Confirmo que quiero eliminar esta cotización completa",
+                                                   key=f"e_del_conf_{sel_cot_edit}")
+                            if st.button("🗑️ Eliminar cotización", disabled=not conf_del,
+                                         key=f"btn_e_del_{sel_cot_edit}"):
+                                eliminar_cotizacion(sel_cot_edit)
+                                st.session_state["msg_cot_borrada"] = True
+                                st.rerun()
+
     # ------ COMPARATIVO Y ORDEN DE COMPRA ------
     with t_comp:
         reqs_con_cot = df_reqs[df_reqs["cotizaciones"] > 0] if not df_reqs.empty else pd.DataFrame()
@@ -1183,6 +1310,14 @@ def seccion_requisiciones():
                 hide_index=True, **FULL_WIDTH,
             )
 
+            gasto_avisado = st.session_state.pop("msg_oc_borrada_gasto", None)
+            if st.session_state.pop("msg_oc_borrada", None):
+                aviso = "Orden de compra eliminada. La requisición volvió a estado cotizado."
+                if gasto_avisado:
+                    aviso += (f" ⚠️ El gasto folio {gasto_avisado} que estaba ligado a ella sigue en la "
+                              "bitácora del control financiero: corrígelo o elimínalo ahí si ya no aplica.")
+                st.warning(aviso)
+
             oc_existente = leer_orden_compra(sel_comp)
             if oc_existente is not None:
                 cot_ganadora = cots_comp[cots_comp["id"] == oc_existente["cotizacion_id"]].iloc[0]
@@ -1201,6 +1336,19 @@ def seccion_requisiciones():
                     )
                 except ImportError:
                     st.error("Falta la librería reportlab en requirements.txt.")
+                if ES_ADMIN:
+                    with st.expander("🗑️ Eliminar esta orden de compra (para corregir la cotización)"):
+                        st.caption("Al eliminarla, la cotización se desbloquea para editarse en la pestaña "
+                                   "«💰 Capturar cotización» y podrás generar una orden nueva.")
+                        conf_oc = st.checkbox("Confirmo que quiero eliminar esta orden de compra",
+                                              key=f"conf_del_oc_{oc_existente['id']}")
+                        if st.button("🗑️ Eliminar orden de compra", disabled=not conf_oc,
+                                     key=f"btn_del_oc_{oc_existente['id']}"):
+                            if pd.notna(oc_existente["gasto_id"]):
+                                st.session_state["msg_oc_borrada_gasto"] = int(oc_existente["gasto_id"])
+                            eliminar_orden_compra(oc_existente["id"])
+                            st.session_state["msg_oc_borrada"] = True
+                            st.rerun()
             elif ES_ADMIN:
                 st.markdown("**Generar Orden de Compra:**")
                 c1, c2, c3 = st.columns([2, 1, 1])
