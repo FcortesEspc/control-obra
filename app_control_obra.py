@@ -312,6 +312,10 @@ def init_db() -> None:
         if "categoria" not in cols_part:
             conn.execute("ALTER TABLE requisicion_partidas ADD COLUMN categoria TEXT DEFAULT 'Material de construcción'")
             conn.execute("ALTER TABLE requisicion_partidas ADD COLUMN observaciones TEXT")
+        # Migración v7: observaciones por partida en las cotizaciones
+        cols_cp = [c[1] for c in conn.execute("PRAGMA table_info(cotizacion_precios)").fetchall()]
+        if "observaciones" not in cols_cp:
+            conn.execute("ALTER TABLE cotizacion_precios ADD COLUMN observaciones TEXT")
         # Sembrar el catálogo la primera vez
         if conn.execute("SELECT COUNT(*) FROM catalogo_materiales").fetchone()[0] == 0:
             conn.executemany(
@@ -446,6 +450,41 @@ def crear_requisicion(fecha: str, fase: str, solicitante: str, fecha_requerida: 
         return rid
 
 
+def actualizar_requisicion(req_id: int, fase: str, solicitante: str, fecha_req: str,
+                           notas: str, obra: str, ubicacion: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE requisiciones SET fase=?, solicitante=?, fecha_requerida=?, notas=?, obra=?, ubicacion=? WHERE id=?",
+            (fase, solicitante.strip(), fecha_req, notas.strip(), obra.strip(), ubicacion.strip(), int(req_id)),
+        )
+
+
+def actualizar_partidas_requisicion(req_id: int, filas: list[dict]) -> None:
+    """Sincroniza las partidas: actualiza las existentes, inserta las nuevas y elimina
+    las que ya no estén (junto con sus precios en las cotizaciones)."""
+    with get_conn() as conn:
+        existentes = {r[0] for r in conn.execute(
+            "SELECT id FROM requisicion_partidas WHERE requisicion_id = ?", (int(req_id),)
+        ).fetchall()}
+        conservadas = set()
+        for f in filas:
+            if f.get("id") and int(f["id"]) in existentes:
+                conn.execute(
+                    "UPDATE requisicion_partidas SET cantidad=?, unidad=?, descripcion=?, categoria=?, observaciones=? WHERE id=?",
+                    (f["cantidad"], f["unidad"], f["descripcion"], f["categoria"], f["observaciones"], int(f["id"])),
+                )
+                conservadas.add(int(f["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO requisicion_partidas (requisicion_id, cantidad, unidad, descripcion, categoria, observaciones) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (int(req_id), f["cantidad"], f["unidad"], f["descripcion"], f["categoria"], f["observaciones"]),
+                )
+        for pid in existentes - conservadas:
+            conn.execute("DELETE FROM cotizacion_precios WHERE partida_id = ?", (int(pid),))
+            conn.execute("DELETE FROM requisicion_partidas WHERE id = ?", (int(pid),))
+
+
 def leer_catalogo() -> pd.DataFrame:
     with get_conn() as conn:
         return pd.read_sql_query(
@@ -501,16 +540,17 @@ def eliminar_requisicion(req_id: int) -> None:
         conn.execute("DELETE FROM requisiciones WHERE id = ?", (int(req_id),))
 
 
-def crear_cotizacion(req_id: int, proveedor: str, fecha: str, entrega: str, pago: str, precios: dict) -> int:
+def crear_cotizacion(req_id: int, proveedor: str, fecha: str, entrega: str, pago: str, precios: dict, obs: dict | None = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO cotizaciones (requisicion_id, proveedor, fecha, tiempo_entrega, condiciones_pago) VALUES (?, ?, ?, ?, ?)",
             (int(req_id), proveedor.strip(), fecha, entrega.strip(), pago.strip()),
         )
         cid = cur.lastrowid
+        obs = obs or {}
         conn.executemany(
-            "INSERT INTO cotizacion_precios (cotizacion_id, partida_id, precio_unitario) VALUES (?, ?, ?)",
-            [(cid, int(pid), float(pu)) for pid, pu in precios.items()],
+            "INSERT INTO cotizacion_precios (cotizacion_id, partida_id, precio_unitario, observaciones) VALUES (?, ?, ?, ?)",
+            [(cid, int(pid), float(pu), str(obs.get(int(pid), "") or "")) for pid, pu in precios.items()],
         )
         return cid
 
@@ -555,15 +595,26 @@ def leer_precios_cotizacion(cot_id: int) -> dict:
     return {int(p): float(v) for p, v in rows}
 
 
-def actualizar_cotizacion(cot_id: int, proveedor: str, fecha: str, entrega: str, pago: str, precios: dict) -> None:
+def leer_obs_cotizacion(cot_id: int) -> dict:
+    """Observaciones por partida capturadas en una cotización: {partida_id: texto}."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT partida_id, COALESCE(observaciones, '') FROM cotizacion_precios WHERE cotizacion_id = ?",
+            (int(cot_id),),
+        ).fetchall()
+    return {int(p): str(o) for p, o in rows}
+
+
+def actualizar_cotizacion(cot_id: int, proveedor: str, fecha: str, entrega: str, pago: str, precios: dict, obs: dict | None = None) -> None:
     with get_conn() as conn:
         conn.execute(
             "UPDATE cotizaciones SET proveedor=?, fecha=?, tiempo_entrega=?, condiciones_pago=? WHERE id=?",
             (proveedor.strip(), fecha, entrega.strip(), pago.strip(), int(cot_id)),
         )
+        obs = obs or {}
         conn.executemany(
-            "INSERT OR REPLACE INTO cotizacion_precios (cotizacion_id, partida_id, precio_unitario) VALUES (?, ?, ?)",
-            [(int(cot_id), int(pid), float(pu)) for pid, pu in precios.items()],
+            "INSERT OR REPLACE INTO cotizacion_precios (cotizacion_id, partida_id, precio_unitario, observaciones) VALUES (?, ?, ?, ?)",
+            [(int(cot_id), int(pid), float(pu), str(obs.get(int(pid), "") or "")) for pid, pu in precios.items()],
         )
 
 
@@ -912,6 +963,10 @@ def generar_pdf_orden_compra(oc, req: pd.Series) -> bytes:
     cot = cots[cots["id"] == oc["cotizacion_id"]].iloc[0]
     precios = leer_precios_requisicion(req["id"])
     precios_cot = precios[precios["cotizacion_id"] == oc["cotizacion_id"]].set_index("partida_id")["precio_unitario"]
+    obs_cot = leer_obs_cotizacion(int(oc["cotizacion_id"]))
+    partidas = partidas.copy()
+    partidas["observaciones"] = partidas.apply(
+        lambda r: (obs_cot.get(int(r["id"])) or str(r["observaciones"] or "")), axis=1)
 
     e = _pdf_estilos()
     buf = BytesIO()
@@ -1125,6 +1180,86 @@ def seccion_requisiciones():
                         eliminar_requisicion(sel_seg)
                         st.rerun()
 
+            # ------ EDITAR LA REQUISICIÓN (datos y partidas) ------
+            if ES_ADMIN or ES_RESIDENTE:
+                if st.session_state.pop("msg_req_edit", None):
+                    st.success("Requisición actualizada.")
+                if req_sel["ocs"] > 0:
+                    st.caption("🔒 Esta requisición ya generó orden de compra; para editarla, primero "
+                               "elimina la OC en la pestaña «⚖️ Comparativo y Orden de Compra».")
+                else:
+                    with st.expander("✏️ Editar esta requisición (datos y partidas)"):
+                        re1, re2 = st.columns(2)
+                        obra_e = re1.text_input("Obra:", value=str(req_sel["obra"] or ""), key=f"er_obra_{sel_seg}")
+                        ubic_e = re2.text_input("Ubicación:", value=str(req_sel["ubicacion"] or ""), key=f"er_ubi_{sel_seg}")
+                        re3, re4 = st.columns(2)
+                        fase_e = re3.selectbox(
+                            "Fase de obra:", FASES,
+                            index=FASES.index(req_sel["fase"]) if req_sel["fase"] in FASES else 0,
+                            key=f"er_fase_{sel_seg}")
+                        fecha_req_e = re4.date_input(
+                            "Fecha requerida en obra:",
+                            value=pd.to_datetime(req_sel["fecha_requerida"]).date(),
+                            key=f"er_freq_{sel_seg}")
+                        sol_e = st.text_input("Solicita:", value=str(req_sel["solicitante"] or ""), key=f"er_sol_{sel_seg}")
+                        notas_e = st.text_input("Notas:", value=str(req_sel["notas"] or ""), key=f"er_notas_{sel_seg}")
+
+                        st.markdown("**Partidas** — corrige cualquier columna, agrega renglones con el ➕ "
+                                    "o elimínalos seleccionándolos y usando el bote de basura del editor:")
+                        df_pa = leer_partidas(sel_seg).rename(columns={
+                            "cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción",
+                            "categoria": "Categoría", "observaciones": "Observaciones"})
+                        pa_edit = st.data_editor(
+                            df_pa,
+                            num_rows="dynamic",
+                            column_config={
+                                "id": None,
+                                "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.01, required=True),
+                                "Unidad": st.column_config.SelectboxColumn("Unidad", options=UNIDADES, required=True),
+                                "Descripción": st.column_config.TextColumn("Descripción", required=True),
+                                "Categoría": st.column_config.SelectboxColumn("Categoría", options=CATEGORIAS, required=True),
+                                "Observaciones": st.column_config.TextColumn(
+                                    "Observaciones", help="Ej. P/ cimentación, P/ castillos y cadena"),
+                            },
+                            hide_index=True,
+                            key=f"er_part_{sel_seg}",
+                            **FULL_WIDTH,
+                        )
+                        if int(req_sel["cotizaciones"]) > 0:
+                            st.caption("ℹ️ Esta requisición ya tiene cotizaciones capturadas: los precios existentes se "
+                                       "conservan por partida; las partidas nuevas aparecerán sin precio en esas "
+                                       "cotizaciones y las que elimines se quitarán también de ellas.")
+                        if st.button("💾 Guardar cambios de la requisición", key=f"btn_er_{sel_seg}"):
+                            filas_req, hay_incompleta = [], False
+                            for _, p in pa_edit.iterrows():
+                                cant = float(p["Cantidad"]) if pd.notna(p["Cantidad"]) else 0.0
+                                uni = str(p["Unidad"] or "").strip() if pd.notna(p["Unidad"]) else ""
+                                des = str(p["Descripción"] or "").strip() if pd.notna(p["Descripción"]) else ""
+                                fila_vacia = pd.isna(p["id"]) and cant == 0 and not uni and not des
+                                if fila_vacia:
+                                    continue  # renglón nuevo sin llenar: se ignora
+                                if cant <= 0 or not uni or not des:
+                                    hay_incompleta = True
+                                    continue
+                                filas_req.append({
+                                    "id": int(p["id"]) if pd.notna(p["id"]) else None,
+                                    "cantidad": cant, "unidad": uni, "descripcion": des,
+                                    "categoria": str(p["Categoría"]) if pd.notna(p["Categoría"]) else CATEGORIAS[0],
+                                    "observaciones": str(p["Observaciones"] or "").strip() if pd.notna(p["Observaciones"]) else "",
+                                })
+                            if hay_incompleta:
+                                st.error("Hay partidas incompletas: cantidad, unidad y descripción son obligatorias.")
+                            elif not sol_e.strip():
+                                st.error("Indica quién solicita el material.")
+                            elif not filas_req:
+                                st.error("La requisición debe conservar al menos una partida completa.")
+                            else:
+                                actualizar_requisicion(sel_seg, fase_e, sol_e, fecha_req_e.isoformat(),
+                                                       notas_e, obra_e, ubic_e)
+                                actualizar_partidas_requisicion(sel_seg, filas_req)
+                                st.session_state["msg_req_edit"] = True
+                                st.rerun()
+
     # ------ CAPTURAR COTIZACIÓN ------
     with t_cot:
         if df_reqs.empty:
@@ -1157,7 +1292,8 @@ def seccion_requisiciones():
                     "Cantidad": st.column_config.NumberColumn(disabled=True),
                     "Unidad": st.column_config.TextColumn(disabled=True),
                     "Descripción": st.column_config.TextColumn(disabled=True),
-                    "Observaciones": st.column_config.TextColumn(disabled=True),
+                    "Observaciones": st.column_config.TextColumn(
+                        "Observaciones", help="Notas de esta cotización: marca, si incluye flete, entrega parcial, etc."),
                     "Precio Unitario": st.column_config.NumberColumn("Precio Unitario", min_value=0.0, format="$%.2f"),
                 },
                 hide_index=True,
@@ -1171,7 +1307,8 @@ def seccion_requisiciones():
                 elif not any(v > 0 for v in precios.values()):
                     st.error("Captura al menos un precio unitario mayor a 0.")
                 else:
-                    crear_cotizacion(sel_cot, proveedor_cot, fecha_cot.isoformat(), entrega_cot, pago_cot, precios)
+                    obs_cap = {int(r["id"]): str(r["Observaciones"] or "") for _, r in precios_edit.iterrows()}
+                    crear_cotizacion(sel_cot, proveedor_cot, fecha_cot.isoformat(), entrega_cot, pago_cot, precios, obs_cap)
                     st.session_state["msg_cot"] = True
                     st.session_state.pop(f"cot_precios_{sel_cot}", None)
                     st.rerun()
@@ -1223,6 +1360,9 @@ def seccion_requisiciones():
                             columns={"cantidad": "Cantidad", "unidad": "Unidad", "descripcion": "Descripción",
                                      "observaciones": "Observaciones"}).drop(columns=["categoria"])
                         df_pe["Precio Unitario"] = df_pe["id"].map(lambda i: precios_act.get(int(i), 0.0))
+                        obs_act = leer_obs_cotizacion(sel_cot_edit)
+                        df_pe["Observaciones"] = df_pe.apply(
+                            lambda r: (obs_act.get(int(r["id"])) or str(r["Observaciones"] or "")), axis=1)
                         pe_edit = st.data_editor(
                             df_pe,
                             column_config={
@@ -1230,7 +1370,8 @@ def seccion_requisiciones():
                                 "Cantidad": st.column_config.NumberColumn(disabled=True),
                                 "Unidad": st.column_config.TextColumn(disabled=True),
                                 "Descripción": st.column_config.TextColumn(disabled=True),
-                                "Observaciones": st.column_config.TextColumn(disabled=True),
+                                "Observaciones": st.column_config.TextColumn(
+                                    "Observaciones", help="Notas de esta cotización: marca, flete, entrega, etc."),
                                 "Precio Unitario": st.column_config.NumberColumn(
                                     "Precio Unitario", min_value=0.0, format="$%.2f"),
                             },
@@ -1248,8 +1389,10 @@ def seccion_requisiciones():
                                 elif not any(v > 0 for v in precios_n.values()):
                                     st.error("Captura al menos un precio unitario mayor a 0.")
                                 else:
+                                    obs_n = {int(r["id"]): str(r["Observaciones"] or "")
+                                             for _, r in pe_edit.iterrows()}
                                     actualizar_cotizacion(sel_cot_edit, prov_e, fecha_e.isoformat(),
-                                                          entrega_e, pago_e, precios_n)
+                                                          entrega_e, pago_e, precios_n, obs_n)
                                     st.session_state["msg_cot_edit"] = True
                                     st.rerun()
                         with ce2:
