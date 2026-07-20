@@ -382,6 +382,43 @@ def guardar_comprobante(gasto_id: int, archivo) -> str | None:
     return nombre
 
 
+def _miniatura_comprobante(nombre) -> str | None:
+    """Data-URL con la miniatura del comprobante para mostrarla dentro de la tabla.
+    Imágenes: miniatura JPEG cacheada en disco. PDFs: ícono genérico. Sin comprobante: None."""
+    import base64
+
+    if not nombre:
+        return None
+    ruta = COMPROBANTES_DIR / str(nombre)
+    if not ruta.exists():
+        return None
+    mini_dir = COMPROBANTES_DIR / "miniaturas"
+    mini_dir.mkdir(exist_ok=True)
+    try:
+        from PIL import Image, ImageDraw
+
+        if ruta.suffix.lower() == ".pdf":
+            icono = mini_dir / "_icono_pdf.png"
+            if not icono.exists():
+                img = Image.new("RGB", (96, 120), "#d62828")
+                d = ImageDraw.Draw(img)
+                d.rectangle([4, 4, 91, 115], outline="white", width=3)
+                d.text((22, 48), "PDF", fill="white")
+                img.save(icono)
+            return "data:image/png;base64," + base64.b64encode(icono.read_bytes()).decode()
+
+        mini = mini_dir / (ruta.stem + ".jpg")
+        if not mini.exists() or mini.stat().st_mtime < ruta.stat().st_mtime:
+            img = Image.open(ruta)
+            img.thumbnail((480, 480))
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.save(mini, quality=70, optimize=True)
+        return "data:image/jpeg;base64," + base64.b64encode(mini.read_bytes()).decode()
+    except Exception:
+        return None
+
+
 def insertar_pago(fecha: str, concepto: str, monto: float) -> None:
     with get_conn() as conn:
         conn.execute(
@@ -1907,7 +1944,7 @@ with tab_gastos:
         st.info("Aún no se han registrado gastos.")
     else:
         df_vista = df_gastos.copy()
-        df_vista["comprobante"] = df_vista["comprobante"].apply(lambda c: "📎 Sí" if c else "—")
+        df_vista["comprobante"] = df_vista["comprobante"].apply(_miniatura_comprobante)
 
         if ES_ADMIN:
             if st.session_state.pop("msg_gastos", None):
@@ -1916,7 +1953,7 @@ with tab_gastos:
             df_edicion = df_gastos.copy()
             df_edicion["fecha"] = pd.to_datetime(df_edicion["fecha"]).dt.date
             df_edicion["proveedor"] = df_edicion["proveedor"].fillna("")
-            df_edicion["comprobante"] = df_edicion["comprobante"].apply(lambda c: "📎 Sí" if c else "—")
+            df_edicion["comprobante"] = df_edicion["comprobante"].apply(_miniatura_comprobante)
             df_edicion.insert(0, "Eliminar", False)
 
             editado = st.data_editor(
@@ -1930,7 +1967,8 @@ with tab_gastos:
                     "monto": st.column_config.NumberColumn("Monto", format="$%.2f", min_value=0.01, required=True),
                     "proveedor": st.column_config.TextColumn("Proveedor"),
                     "descripcion": st.column_config.TextColumn("Descripción", required=True),
-                    "comprobante": st.column_config.TextColumn("Comprobante", disabled=True),
+                    "comprobante": st.column_config.ImageColumn(
+                        "Comprobante", help="Da clic en la imagen para ampliarla"),
                 },
                 disabled=["id", "comprobante"],
                 num_rows="fixed",
@@ -2035,6 +2073,8 @@ with tab_gastos:
             st.dataframe(
                 df_vista.rename(columns={"id": "Folio", "monto": "Monto", "comprobante": "Comprobante"})
                 .style.format({"Monto": "${:,.2f}"}),
+                column_config={"Comprobante": st.column_config.ImageColumn(
+                    "Comprobante", help="Da clic en la imagen para ampliarla")},
                 hide_index=True,
                 **FULL_WIDTH,
             )
