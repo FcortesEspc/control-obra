@@ -618,6 +618,17 @@ def actualizar_cotizacion(cot_id: int, proveedor: str, fecha: str, entrega: str,
         )
 
 
+def sincronizar_partidas_basicas(filas: list[tuple]) -> None:
+    """Corrige cantidad, unidad y descripción de partidas desde la captura/edición de cotizaciones.
+    Cada fila: (cantidad, unidad, descripcion, partida_id). Aplica a la requisición,
+    por lo que el cambio se refleja en todas sus cotizaciones."""
+    with get_conn() as conn:
+        conn.executemany(
+            "UPDATE requisicion_partidas SET cantidad=?, unidad=?, descripcion=? WHERE id=?",
+            [(float(c), str(u).strip(), str(d).strip(), int(i)) for c, u, d, i in filas],
+        )
+
+
 def cotizacion_oc(cot_id: int):
     """Devuelve la orden de compra ligada a la cotización, o None si no tiene."""
     with get_conn() as conn:
@@ -1289,9 +1300,9 @@ def seccion_requisiciones():
                 df_precios,
                 column_config={
                     "id": None,
-                    "Cantidad": st.column_config.NumberColumn(disabled=True),
-                    "Unidad": st.column_config.TextColumn(disabled=True),
-                    "Descripción": st.column_config.TextColumn(disabled=True),
+                    "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.01),
+                    "Unidad": st.column_config.TextColumn("Unidad"),
+                    "Descripción": st.column_config.TextColumn("Descripción"),
                     "Observaciones": st.column_config.TextColumn(
                         "Observaciones", help="Notas de esta cotización: marca, si incluye flete, entrega parcial, etc."),
                     "Precio Unitario": st.column_config.NumberColumn("Precio Unitario", min_value=0.0, format="$%.2f"),
@@ -1300,13 +1311,25 @@ def seccion_requisiciones():
                 key=f"cot_precios_{sel_cot}",
                 **FULL_WIDTH,
             )
+            st.caption("✏️ Cantidad, unidad y descripción también son corregibles aquí: el cambio se guarda "
+                       "en la requisición y aplica a todas sus cotizaciones. Las observaciones y el precio "
+                       "son propios de esta cotización.")
             if st.button("💾 Guardar cotización", key="btn_guardar_cot"):
                 precios = {int(r["id"]): float(r["Precio Unitario"] or 0) for _, r in precios_edit.iterrows()}
-                if not proveedor_cot.strip():
+                partida_invalida = any(
+                    (pd.isna(r["Cantidad"]) or float(r["Cantidad"]) <= 0
+                     or not str(r["Unidad"] or "").strip() or not str(r["Descripción"] or "").strip())
+                    for _, r in precios_edit.iterrows())
+                if partida_invalida:
+                    st.error("Cantidad, unidad y descripción no pueden quedar vacías en ninguna partida.")
+                elif not proveedor_cot.strip():
                     st.error("Indica el nombre del proveedor.")
                 elif not any(v > 0 for v in precios.values()):
                     st.error("Captura al menos un precio unitario mayor a 0.")
                 else:
+                    sincronizar_partidas_basicas([
+                        (r["Cantidad"], r["Unidad"], r["Descripción"], r["id"])
+                        for _, r in precios_edit.iterrows()])
                     obs_cap = {int(r["id"]): str(r["Observaciones"] or "") for _, r in precios_edit.iterrows()}
                     crear_cotizacion(sel_cot, proveedor_cot, fecha_cot.isoformat(), entrega_cot, pago_cot, precios, obs_cap)
                     st.session_state["msg_cot"] = True
@@ -1367,9 +1390,9 @@ def seccion_requisiciones():
                             df_pe,
                             column_config={
                                 "id": None,
-                                "Cantidad": st.column_config.NumberColumn(disabled=True),
-                                "Unidad": st.column_config.TextColumn(disabled=True),
-                                "Descripción": st.column_config.TextColumn(disabled=True),
+                                "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0.01),
+                                "Unidad": st.column_config.TextColumn("Unidad"),
+                                "Descripción": st.column_config.TextColumn("Descripción"),
                                 "Observaciones": st.column_config.TextColumn(
                                     "Observaciones", help="Notas de esta cotización: marca, flete, entrega, etc."),
                                 "Precio Unitario": st.column_config.NumberColumn(
@@ -1379,16 +1402,28 @@ def seccion_requisiciones():
                             key=f"e_precios_{sel_cot_edit}",
                             **FULL_WIDTH,
                         )
+                        st.caption("✏️ Cantidad, unidad y descripción se corrigen en la requisición "
+                                   "(aplican a todas sus cotizaciones); observaciones y precio son de esta cotización.")
                         ce1, ce2 = st.columns([1, 2])
                         with ce1:
                             if st.button("💾 Guardar corrección", key=f"btn_e_save_{sel_cot_edit}"):
                                 precios_n = {int(r["id"]): float(r["Precio Unitario"] or 0)
                                              for _, r in pe_edit.iterrows()}
-                                if not prov_e.strip():
+                                partida_invalida_e = any(
+                                    (pd.isna(r["Cantidad"]) or float(r["Cantidad"]) <= 0
+                                     or not str(r["Unidad"] or "").strip()
+                                     or not str(r["Descripción"] or "").strip())
+                                    for _, r in pe_edit.iterrows())
+                                if partida_invalida_e:
+                                    st.error("Cantidad, unidad y descripción no pueden quedar vacías.")
+                                elif not prov_e.strip():
                                     st.error("El proveedor no puede quedar vacío.")
                                 elif not any(v > 0 for v in precios_n.values()):
                                     st.error("Captura al menos un precio unitario mayor a 0.")
                                 else:
+                                    sincronizar_partidas_basicas([
+                                        (r["Cantidad"], r["Unidad"], r["Descripción"], r["id"])
+                                        for _, r in pe_edit.iterrows()])
                                     obs_n = {int(r["id"]): str(r["Observaciones"] or "")
                                              for _, r in pe_edit.iterrows()}
                                     actualizar_cotizacion(sel_cot_edit, prov_e, fecha_e.isoformat(),
@@ -1953,6 +1988,49 @@ with tab_gastos:
                     file_name=f"bitacora_gastos_JE132_{datetime.now():%Y%m%d}.csv",
                     mime="text/csv",
                 )
+
+            # --- Adjuntar, reemplazar o quitar comprobante de un gasto existente ---
+            with st.expander("📎 Adjuntar o reemplazar comprobante de un gasto"):
+                if st.session_state.pop("msg_comp_ok", None):
+                    st.success("Comprobante guardado.")
+                if st.session_state.pop("msg_comp_quitado", None):
+                    st.success("Comprobante eliminado del gasto.")
+                opciones_g = {
+                    f"Folio {r['id']} | {r['fecha']} | ${r['monto']:,.2f} | {str(r['descripcion'])[:40]}"
+                    + (" 📎" if r["comprobante"] else ""): int(r["id"])
+                    for _, r in df_gastos.iterrows()
+                }
+                sel_g_comp = st.selectbox("Gasto:", list(opciones_g.keys()), key="sel_gasto_comp")
+                gid_comp = opciones_g[sel_g_comp]
+                comp_actual = df_gastos.set_index("id").loc[gid_comp, "comprobante"]
+                if comp_actual:
+                    st.caption(f"Este gasto ya tiene comprobante ({comp_actual}); al subir uno nuevo se reemplaza.")
+
+                archivo_nuevo = st.file_uploader(
+                    "Foto de nota, factura o PDF:",
+                    type=["jpg", "jpeg", "png", "webp", "pdf"],
+                    key=f"up_comp_{gid_comp}",
+                )
+                cc_a, cc_b = st.columns([1, 2])
+                with cc_a:
+                    if st.button("💾 Guardar comprobante", key=f"btn_comp_{gid_comp}",
+                                 disabled=archivo_nuevo is None):
+                        if comp_actual:  # limpiar el archivo anterior (podría tener otra extensión)
+                            (COMPROBANTES_DIR / str(comp_actual)).unlink(missing_ok=True)
+                        guardar_comprobante(gid_comp, archivo_nuevo)
+                        st.session_state["msg_comp_ok"] = True
+                        st.rerun()
+                with cc_b:
+                    if comp_actual:
+                        conf_quitar = st.checkbox("Confirmo quitar el comprobante de este gasto",
+                                                  key=f"conf_quitar_{gid_comp}")
+                        if st.button("🗑️ Quitar comprobante", disabled=not conf_quitar,
+                                     key=f"btn_quitar_comp_{gid_comp}"):
+                            (COMPROBANTES_DIR / str(comp_actual)).unlink(missing_ok=True)
+                            with get_conn() as conn:
+                                conn.execute("UPDATE gastos SET comprobante = NULL WHERE id = ?", (gid_comp,))
+                            st.session_state["msg_comp_quitado"] = True
+                            st.rerun()
         else:
             st.dataframe(
                 df_vista.rename(columns={"id": "Folio", "monto": "Monto", "comprobante": "Comprobante"})
@@ -1975,7 +2053,10 @@ with tab_gastos:
                 if not ruta.exists():
                     st.error("El archivo del comprobante no se encontró en el almacenamiento.")
                 elif ruta.suffix.lower() in EXTENSIONES_IMAGEN:
-                    st.image(str(ruta), caption=f"Comprobante del folio {registro['id']}", **FULL_WIDTH)
+                    try:
+                        st.image(str(ruta), caption=f"Comprobante del folio {registro['id']}", **FULL_WIDTH)
+                    except Exception:
+                        st.warning("La imagen no se pudo previsualizar; puedes descargarla directamente.")
                     st.download_button(
                         "⬇️ Descargar imagen", ruta.read_bytes(),
                         file_name=ruta.name, key=f"dl_{registro['id']}",
