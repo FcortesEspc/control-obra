@@ -2360,6 +2360,176 @@ with col_xls:
     except ImportError:
         st.error("Falta la librería openpyxl. Agrega 'openpyxl' al requirements.txt.")
 
+
+# --- Informe por periodo (estado de cuenta con corte de fechas) ---
+def _corte_periodo(desde: str, hasta: str) -> dict:
+    """Corte financiero: acumulado anterior al periodo, movimientos del periodo y saldo final."""
+    g_antes = df_gastos[df_gastos["fecha"] < desde]
+    g_per = df_gastos[(df_gastos["fecha"] >= desde) & (df_gastos["fecha"] <= hasta)]
+    p_antes = df_pagos[df_pagos["fecha"] < desde]
+    p_per = df_pagos[(df_pagos["fecha"] >= desde) & (df_pagos["fecha"] <= hasta)]
+
+    cobrado_antes = float(p_antes["monto"].sum())
+    gastado_antes = float(g_antes["monto"].sum())
+    saldo_inicial = cobrado_antes - gastado_antes
+    cobrado_per = float(p_per["monto"].sum())
+    gastado_per = float(g_per["monto"].sum())
+    return {
+        "g_per": g_per, "p_per": p_per,
+        "cobrado_antes": cobrado_antes, "gastado_antes": gastado_antes,
+        "saldo_inicial": saldo_inicial,
+        "cobrado_per": cobrado_per, "gastado_per": gastado_per,
+        "saldo_final": saldo_inicial + cobrado_per - gastado_per,
+        "cobrado_cierre": cobrado_antes + cobrado_per,
+        "gastado_cierre": gastado_antes + gastado_per,
+    }
+
+
+def generar_informe_periodo_pdf(desde: str, hasta: str) -> bytes:
+    """Informe por periodo: saldo al día anterior, movimientos del periodo y saldo al cierre."""
+    from io import BytesIO
+
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    e = _pdf_estilos()
+    c = _corte_periodo(desde, hasta)
+    dia_antes = (pd.to_datetime(desde) - pd.Timedelta(days=1)).date().isoformat()
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
+                            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                            title=f"Informe por Periodo {desde} a {hasta}")
+
+    encabezado = Table([
+        ["INFORME FINANCIERO POR PERIODO", f"Periodo: {desde} al {hasta}"],
+        ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", f"Emitido: {datetime.now():%Y-%m-%d}"],
+        ["Cliente: José Manuel Robles Miguel", ""],
+        ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
+    ], colWidths=[12.2 * cm, 6.4 * cm])
+    encabezado.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (0, 0), 13),
+        ("FONTSIZE", (1, 0), (1, 0), 10),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+    ]))
+    elems = [encabezado, Spacer(1, 8)]
+
+    # 1. Estado de cuenta del periodo
+    elems.append(Paragraph("1. Estado de Cuenta del Periodo", e["h2"]))
+    t_edo = Table([
+        ["Concepto", "Monto"],
+        [f"Saldo en caja al {dia_antes} (cobrado {_dinero(c['cobrado_antes'])} − gastado {_dinero(c['gastado_antes'])})",
+         _dinero(c["saldo_inicial"])],
+        ["(+) Cobrado al cliente en el periodo", _dinero(c["cobrado_per"])],
+        ["(−) Gastos del periodo", _dinero(c["gastado_per"])],
+        [f"Saldo en caja al {hasta}", _dinero(c["saldo_final"])],
+    ], colWidths=[13 * cm, 4.5 * cm])
+    t_edo.setStyle(e["tabla"])
+    elems.append(t_edo)
+
+    # 2. Desglose del gasto del periodo
+    elems.append(Paragraph("2. Desglose del Gasto del Periodo", e["h2"]))
+    g_per = c["g_per"]
+    filas_tipo = [["Por tipo", "Monto"]]
+    for tipo in TIPOS_DIRECTOS + [FASE_INDIRECTOS]:
+        filas_tipo.append([tipo, _dinero(float(g_per.loc[g_per["tipo"] == tipo, "monto"].sum()))])
+    filas_tipo.append(["Total del periodo", _dinero(c["gastado_per"])])
+    t_tipo = Table(filas_tipo, colWidths=[9 * cm, 4.5 * cm])
+    t_tipo.setStyle(e["tabla"])
+    elems.append(t_tipo)
+
+    if not g_per.empty:
+        elems.append(Spacer(1, 6))
+        filas_fase = [["Por fase", "Monto"]]
+        for fase, monto in g_per.groupby("fase")["monto"].sum().sort_values(ascending=False).items():
+            filas_fase.append([Paragraph(str(fase), e["chico"]), _dinero(float(monto))])
+        t_fase = Table(filas_fase, colWidths=[9 * cm, 4.5 * cm])
+        t_fase.setStyle(e["tabla"])
+        elems.append(t_fase)
+
+    # 3. Detalle de gastos del periodo
+    elems.append(Paragraph("3. Detalle de Gastos del Periodo", e["h2"]))
+    if g_per.empty:
+        elems.append(Paragraph("Sin gastos registrados en el periodo.", e["normal"]))
+    else:
+        filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
+        for _, r in g_per.sort_values(["fecha", "id"]).iterrows():
+            filas_g.append([
+                str(r["id"]), r["fecha"], Paragraph(str(r["fase"]).split(":")[0], e["chico"]),
+                Paragraph(str(r["tipo"]), e["chico"]), _dinero(float(r["monto"])),
+                Paragraph(str(r["proveedor"] or ""), e["chico"]), Paragraph(str(r["descripcion"]), e["chico"]),
+            ])
+        t_g = Table(filas_g, colWidths=[1.2 * cm, 2 * cm, 1.9 * cm, 2.4 * cm, 2.4 * cm, 3.3 * cm, 4.6 * cm],
+                    repeatRows=1)
+        t_g.setStyle(e["tabla"])
+        elems.append(t_g)
+
+    # 4. Pagos del cliente en el periodo
+    elems.append(Paragraph("4. Pagos del Cliente en el Periodo", e["h2"]))
+    p_per = c["p_per"]
+    if p_per.empty:
+        elems.append(Paragraph("Sin pagos registrados en el periodo.", e["normal"]))
+    else:
+        filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
+        for _, r in p_per.sort_values(["fecha", "id"]).iterrows():
+            filas_p.append([str(r["id"]), r["fecha"], Paragraph(str(r["concepto"]), e["chico"]),
+                            _dinero(float(r["monto"]))])
+        filas_p.append(["", "", "Total cobrado en el periodo", _dinero(c["cobrado_per"])])
+        t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
+        t_p.setStyle(e["tabla"])
+        elems.append(t_p)
+
+    # 5. Acumulado del proyecto al cierre
+    elems.append(Paragraph("5. Acumulado del Proyecto al Cierre del Periodo", e["h2"]))
+    pct_cierre = (c["gastado_cierre"] / total_presupuestado * 100) if total_presupuestado else 0
+    t_ac = Table([
+        ["Concepto", "Monto"],
+        ["Cobrado acumulado", _dinero(c["cobrado_cierre"])],
+        ["Gastado acumulado", f"{_dinero(c['gastado_cierre'])}  ({pct_cierre:.1f}% del presupuesto)"],
+        ["Presupuesto total contratado", _dinero(total_presupuestado)],
+    ], colWidths=[9 * cm, 8.5 * cm])
+    t_ac.setStyle(e["tabla"])
+    elems.append(t_ac)
+
+    elems.append(Spacer(1, 10))
+    elems.append(Paragraph(f"Documento generado el {datetime.now():%d/%m/%Y %H:%M}.", e["chico"]))
+    doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+    return buf.getvalue()
+
+
+with st.expander("📆 Informe por Periodo (estado de cuenta con corte de fechas)"):
+    st.caption("Selecciona el periodo: el informe muestra el saldo acumulado al día anterior, "
+               "los movimientos del periodo y el saldo al cierre.")
+    cp1, cp2 = st.columns(2)
+    desde_per = cp1.date_input("Desde:", value=(datetime.now() - pd.Timedelta(days=6)).date(), key="inf_per_desde")
+    hasta_per = cp2.date_input("Hasta:", value=datetime.now().date(), key="inf_per_hasta")
+    if desde_per > hasta_per:
+        st.error("La fecha inicial no puede ser posterior a la final.")
+    else:
+        d_iso, h_iso = desde_per.isoformat(), hasta_per.isoformat()
+        cte = _corte_periodo(d_iso, h_iso)
+        dia_antes_ui = (pd.to_datetime(d_iso) - pd.Timedelta(days=1)).date().isoformat()
+        mp1, mp2, mp3, mp4 = st.columns(4)
+        mp1.metric(f"Saldo al {dia_antes_ui}", f"${cte['saldo_inicial']:,.2f}")
+        mp2.metric("Cobrado en el periodo", f"${cte['cobrado_per']:,.2f}")
+        mp3.metric("Gastos del periodo", f"${cte['gastado_per']:,.2f}")
+        mp4.metric(f"Saldo al {h_iso}", f"${cte['saldo_final']:,.2f}")
+        try:
+            st.download_button(
+                "📄 Descargar Informe del Periodo (PDF)",
+                generar_informe_periodo_pdf(d_iso, h_iso),
+                file_name=f"informe_periodo_{d_iso}_a_{h_iso}_JE132.pdf",
+                mime="application/pdf",
+                key="dl_inf_periodo",
+                **FULL_WIDTH,
+            )
+        except ImportError:
+            st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
 # ---------------------------------------------------------------
 # VISTA: INFORMES DE AVANCE DE OBRA (admin redacta, cliente consulta)
 # ---------------------------------------------------------------
