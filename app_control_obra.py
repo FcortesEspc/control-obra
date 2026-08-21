@@ -2102,6 +2102,13 @@ with tab_gastos:
                         file_name=ruta.name, key=f"dl_{registro['id']}",
                     )
                 else:
+                    if hasattr(st, "pdf"):
+                        try:
+                            st.pdf(ruta.read_bytes(), height=650, key=f"pdf_{registro['id']}")
+                        except Exception:
+                            st.warning("El PDF no se pudo previsualizar; puedes descargarlo directamente.")
+                    else:
+                        st.info("Tu versión de Streamlit no incluye el visor de PDF; descárgalo para verlo.")
                     st.download_button(
                         "⬇️ Descargar comprobante PDF", ruta.read_bytes(),
                         file_name=ruta.name, mime="application/pdf", key=f"dl_{registro['id']}",
