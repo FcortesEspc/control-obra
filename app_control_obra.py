@@ -116,6 +116,15 @@ except Exception:
 FULL_WIDTH = {"width": "stretch"} if _ver >= (1, 46) else {"use_container_width": True}
 
 
+def _f_fecha(v) -> str:
+    """Formatea cualquier fecha (str ISO, date o Timestamp) como DD-MM-AAAA para mostrarla.
+    El almacenamiento en la base de datos permanece en formato ISO (AAAA-MM-DD)."""
+    try:
+        return pd.to_datetime(v).strftime("%d-%m-%Y")
+    except Exception:
+        return str(v)
+
+
 # ---------------------------------------------------------------
 # CONTROL DE ACCESO Y ROLES
 # ---------------------------------------------------------------
@@ -768,7 +777,7 @@ if ES_ADMIN:
                 st.caption("Gasto indirecto asociado a esta fase (supervisión, gestión, trámites, etc.).")
 
         with st.form("form_gasto", clear_on_submit=True):
-            fecha_gasto = st.date_input("Fecha del gasto:", value=datetime.now().date())
+            fecha_gasto = st.date_input("Fecha del gasto:", format="DD-MM-YYYY", value=datetime.now().date())
             monto_gasto = st.number_input("Monto ($ MXN):", min_value=0.0, step=500.0)
             proveedor = st.text_input("Proveedor / Beneficiario:")
             descripcion_gasto = st.text_input("Descripción (Ej. Compra de varilla, Pago de destajo):")
@@ -796,7 +805,7 @@ if ES_ADMIN:
     with st.sidebar.expander("Registrar pago del cliente"):
         st.caption("Anticipo, estimaciones y pagos parciales. El saldo en caja se calcula contra estos cobros.")
         with st.form("form_pago", clear_on_submit=True):
-            fecha_pago = st.date_input("Fecha del pago:", value=datetime.now().date(), key="p_fecha")
+            fecha_pago = st.date_input("Fecha del pago:", format="DD-MM-YYYY", value=datetime.now().date(), key="p_fecha")
             concepto_pago = st.text_input("Concepto (Ej. Anticipo inicial, Estimación 1):")
             monto_pago = st.number_input("Monto ($ MXN):", min_value=0.0, step=1000.0, key="p_monto")
             if st.form_submit_button("Guardar pago"):
@@ -986,8 +995,8 @@ def generar_pdf_solicitud_cotizacion(req: pd.Series) -> bytes:
 
     encabezado = Table([
         ["RELACIÓN DE MATERIALES — SOLICITUD DE COTIZACIÓN", f"Folio: {folio_req(req['id'])}"],
-        [f"Obra: {obra_txt}", f"Fecha: {req['fecha']}"],
-        ["Propietario: José Manuel Robles Miguel", f"Requerido en obra: {req['fecha_requerida']}"],
+        [f"Obra: {obra_txt}", f"Fecha: {_f_fecha(req['fecha'])}"],
+        ["Propietario: José Manuel Robles Miguel", f"Requerido en obra: {_f_fecha(req['fecha_requerida'])}"],
         [f"Ubicación: {ubicacion_txt}", f"Solicita: {req['solicitante']}"],
         ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", f"Etapa: {req['fase'].split(':')[0]}"],
     ], colWidths=[12.2 * cm, 6.4 * cm])
@@ -1040,7 +1049,7 @@ def generar_pdf_orden_compra(oc, req: pd.Series) -> bytes:
                             title=f"Orden de Compra {folio_oc_num(oc['id'])}")
     elems = [
         Paragraph("ORDEN DE COMPRA", e["titulo"]),
-        Paragraph(f"Folio: {folio_oc_num(oc['id'])} | Fecha: {oc['fecha']} | Ref: {folio_req(req['id'])}", e["normal"]),
+        Paragraph(f"Folio: {folio_oc_num(oc['id'])} | Fecha: {_f_fecha(oc['fecha'])} | Ref: {folio_req(req['id'])}", e["normal"]),
         Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", e["sub"]),
         Paragraph("Emite: DACAM & HOGAR 911 | control.hogar911.com", e["sub"]),
         Spacer(1, 8),
@@ -1049,7 +1058,7 @@ def generar_pdf_orden_compra(oc, req: pd.Series) -> bytes:
         Paragraph(f"Proveedor: {cot['proveedor']}", e["h2"]),
         Paragraph(f"Tiempo de entrega: {cot['tiempo_entrega'] or 'Por confirmar'} | "
                   f"Condiciones de pago: {cot['condiciones_pago'] or 'Por confirmar'}", e["normal"]),
-        Paragraph(f"Entregar en obra. Etapa: {req['fase']} | Fecha requerida: {req['fecha_requerida']}", e["normal"]),
+        Paragraph(f"Entregar en obra. Etapa: {req['fase']} | Fecha requerida: {_f_fecha(req['fecha_requerida'])}", e["normal"]),
         Paragraph("Partidas", e["h2"]),
     ]
     elems.extend(filas_datos)
@@ -1089,7 +1098,7 @@ def seccion_requisiciones():
         ubicacion_req = c2.text_input("Ubicación (opcional):", key="req_ubicacion")
         c3, c4 = st.columns(2)
         fase_req = c3.selectbox("Fase de obra:", FASES, key="req_fase")
-        fecha_requerida = c4.date_input("Fecha requerida en obra:", value=datetime.now().date(), key="req_fecha_req")
+        fecha_requerida = c4.date_input("Fecha requerida en obra:", format="DD-MM-YYYY", value=datetime.now().date(), key="req_fecha_req")
         solicitante = st.text_input("Solicita (arquitecto / encargado de obra):", key="req_solicitante")
         notas_req = st.text_input("Notas para los proveedores (opcional):", key="req_notas")
 
@@ -1201,6 +1210,8 @@ def seccion_requisiciones():
         else:
             df_seg = df_reqs.copy()
             df_seg["Folio"] = df_seg["id"].apply(folio_req)
+            df_seg["fecha"] = df_seg["fecha"].map(_f_fecha)
+            df_seg["fecha_requerida"] = df_seg["fecha_requerida"].map(_f_fecha)
             df_seg["Estatus"] = df_seg.apply(
                 lambda r: "🟣 OC generada" if r["ocs"] > 0
                 else ("🔵 Cotizada" if r["cotizaciones"] > 0 else "🟠 Pendiente de cotizar"), axis=1)
@@ -1263,7 +1274,7 @@ def seccion_requisiciones():
                             index=FASES.index(req_sel["fase"]) if req_sel["fase"] in FASES else 0,
                             key=f"er_fase_{sel_seg}")
                         fecha_req_e = re4.date_input(
-                            "Fecha requerida en obra:",
+                            "Fecha requerida en obra:", format="DD-MM-YYYY",
                             value=pd.to_datetime(req_sel["fecha_requerida"]).date(),
                             key=f"er_freq_{sel_seg}")
                         sol_e = st.text_input("Solicita:", value=str(req_sel["solicitante"] or ""), key=f"er_sol_{sel_seg}")
@@ -1340,7 +1351,7 @@ def seccion_requisiciones():
             )
             c1, c2 = st.columns(2)
             proveedor_cot = c1.text_input("Proveedor:", key="cot_proveedor")
-            fecha_cot = c2.date_input("Fecha de la cotización:", value=datetime.now().date(), key="cot_fecha")
+            fecha_cot = c2.date_input("Fecha de la cotización:", format="DD-MM-YYYY", value=datetime.now().date(), key="cot_fecha")
             c3, c4 = st.columns(2)
             entrega_cot = c3.text_input("Tiempo de entrega (Ej. 3 días hábiles):", key="cot_entrega")
             pago_cot = c4.text_input("Condiciones de pago (Ej. Contado, 50% anticipo):", key="cot_pago")
@@ -1359,7 +1370,7 @@ def seccion_requisiciones():
                     "Descripción": st.column_config.TextColumn("Descripción"),
                     "Observaciones": st.column_config.TextColumn(
                         "Observaciones", help="Notas de esta cotización: marca, si incluye flete, entrega parcial, etc."),
-                    "Precio Unitario": st.column_config.NumberColumn("Precio Unitario", min_value=0.0, format="$%.2f"),
+                    "Precio Unitario": st.column_config.NumberColumn("Precio Unitario", min_value=0.0, format="dollar"),
                 },
                 hide_index=True,
                 key=f"cot_precios_{sel_cot}",
@@ -1405,7 +1416,7 @@ def seccion_requisiciones():
                         "Cotización a corregir:",
                         cots_edit["id"].tolist(),
                         format_func=lambda i: f"{cots_edit.set_index('id').loc[i, 'proveedor']} | "
-                                              f"{cots_edit.set_index('id').loc[i, 'fecha']}",
+                                              f"{_f_fecha(cots_edit.set_index('id').loc[i, 'fecha'])}",
                         key=f"cot_edit_sel_{sel_cot}",
                     )
                     oc_ligada = cotizacion_oc(sel_cot_edit)
@@ -1421,7 +1432,7 @@ def seccion_requisiciones():
                         ec1, ec2 = st.columns(2)
                         prov_e = ec1.text_input("Proveedor:", value=str(datos_cot["proveedor"]),
                                                 key=f"e_prov_{sel_cot_edit}")
-                        fecha_e = ec2.date_input("Fecha de la cotización:",
+                        fecha_e = ec2.date_input("Fecha de la cotización:", format="DD-MM-YYYY",
                                                  value=pd.to_datetime(datos_cot["fecha"]).date(),
                                                  key=f"e_fecha_{sel_cot_edit}")
                         ec3, ec4 = st.columns(2)
@@ -1450,7 +1461,7 @@ def seccion_requisiciones():
                                 "Observaciones": st.column_config.TextColumn(
                                     "Observaciones", help="Notas de esta cotización: marca, flete, entrega, etc."),
                                 "Precio Unitario": st.column_config.NumberColumn(
-                                    "Precio Unitario", min_value=0.0, format="$%.2f"),
+                                    "Precio Unitario", min_value=0.0, format="dollar"),
                             },
                             hide_index=True,
                             key=f"e_precios_{sel_cot_edit}",
@@ -1678,7 +1689,7 @@ def generar_pdf_informe_avance(inf: pd.Series) -> bytes:
 
     encabezado = Table([
         ["INFORME DE AVANCE DE OBRA", f"Folio: {folio_inf(inf['id'])}"],
-        ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", f"Fecha: {inf['fecha']}"],
+        ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", f"Fecha: {_f_fecha(inf['fecha'])}"],
         ["Cliente: José Manuel Robles Miguel", f"Periodo: {inf['periodo']}"],
         ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", f"Elaboró: {inf['elaboro']}"],
     ], colWidths=[12.2 * cm, 6.4 * cm])
@@ -1782,7 +1793,7 @@ def seccion_informes_avance(puede_editar: bool):
         return
 
     opciones_inf = {
-        f"{folio_inf(r['id'])} | {r['fecha']} | {r['periodo']}": int(r["id"])
+        f"{folio_inf(r['id'])} | {_f_fecha(r['fecha'])} | {r['periodo']}": int(r["id"])
         for _, r in df_inf.iterrows()
     }
     sel_inf = st.selectbox("Consultar informe:", list(opciones_inf.keys()), key="sel_inf_avance")
@@ -1804,7 +1815,7 @@ def seccion_informes_avance(puede_editar: bool):
                 st.rerun()
 
     st.markdown(f"**Periodo:** {inf['periodo']} &nbsp;|&nbsp; **Elaboró:** {inf['elaboro']} "
-                f"&nbsp;|&nbsp; **Fecha:** {inf['fecha']}")
+                f"&nbsp;|&nbsp; **Fecha:** {_f_fecha(inf['fecha'])}")
     vc1, vc2, vc3 = st.columns(3)
     with vc1:
         st.markdown("**✅ Trabajos realizados:**")
@@ -1962,6 +1973,7 @@ with tab_gastos:
     else:
         df_vista = df_gastos.copy()
         df_vista["comprobante"] = df_vista["comprobante"].apply(_miniatura_comprobante)
+        df_vista["fecha"] = df_vista["fecha"].map(_f_fecha)
 
         if ES_ADMIN:
             if st.session_state.pop("msg_gastos", None):
@@ -1978,10 +1990,10 @@ with tab_gastos:
                 column_config={
                     "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca los registros a borrar"),
                     "id": st.column_config.NumberColumn("Folio", disabled=True),
-                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="YYYY-MM-DD"),
+                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="DD-MM-YYYY"),
                     "fase": st.column_config.SelectboxColumn("Fase", options=FASES + [FASE_INDIRECTOS], required=True),
                     "tipo": st.column_config.SelectboxColumn("Tipo", options=TIPOS_DIRECTOS + [FASE_INDIRECTOS], required=True),
-                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", min_value=0.01, required=True),
+                    "monto": st.column_config.NumberColumn("Monto", format="dollar", min_value=0.01, required=True),
                     "proveedor": st.column_config.TextColumn("Proveedor"),
                     "descripcion": st.column_config.TextColumn("Descripción", required=True),
                     "comprobante": st.column_config.ImageColumn(
@@ -2051,7 +2063,7 @@ with tab_gastos:
                 if st.session_state.pop("msg_comp_quitado", None):
                     st.success("Comprobante eliminado del gasto.")
                 opciones_g = {
-                    f"Folio {r['id']} | {r['fecha']} | ${r['monto']:,.2f} | {str(r['descripcion'])[:40]}"
+                    f"Folio {r['id']} | {_f_fecha(r['fecha'])} | ${r['monto']:,.2f} | {str(r['descripcion'])[:40]}"
                     + (" 📎" if r["comprobante"] else ""): int(r["id"])
                     for _, r in df_gastos.iterrows()
                 }
@@ -2101,7 +2113,7 @@ with tab_gastos:
         if not con_comprobante.empty:
             with st.expander("🔍 Ver comprobante de un gasto"):
                 opciones = {
-                    f"Folio {r['id']} | {r['fecha']} | ${r['monto']:,.2f} | {r['descripcion'][:40]}": r
+                    f"Folio {r['id']} | {_f_fecha(r['fecha'])} | ${r['monto']:,.2f} | {r['descripcion'][:40]}": r
                     for _, r in con_comprobante.iterrows()
                 }
                 seleccion = st.selectbox("Selecciona el gasto:", list(opciones.keys()))
@@ -2147,9 +2159,9 @@ with tab_pagos:
                 column_config={
                     "Eliminar": st.column_config.CheckboxColumn("Eliminar"),
                     "id": st.column_config.NumberColumn("Folio", disabled=True),
-                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="YYYY-MM-DD"),
+                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="DD-MM-YYYY"),
                     "concepto": st.column_config.TextColumn("Concepto", required=True),
-                    "monto": st.column_config.NumberColumn("Monto", format="$%.2f", min_value=0.01, required=True),
+                    "monto": st.column_config.NumberColumn("Monto", format="dollar", min_value=0.01, required=True),
                 },
                 disabled=["id"],
                 num_rows="fixed",
@@ -2197,7 +2209,8 @@ with tab_pagos:
                         st.warning("No hay registros marcados.")
         else:
             st.dataframe(
-                df_pagos.rename(columns={"id": "Folio", "monto": "Monto"})
+                df_pagos.assign(fecha=df_pagos["fecha"].map(_f_fecha))
+                .rename(columns={"id": "Folio", "monto": "Monto"})
                 .style.format({"Monto": "${:,.2f}"}),
                 hide_index=True,
                 **FULL_WIDTH,
@@ -2306,7 +2319,7 @@ def generar_informe_pdf() -> bytes:
         filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
         for _, r in df_gastos.sort_values(["fecha", "id"]).iterrows():
             filas_g.append([
-                str(r["id"]), r["fecha"], Paragraph(r["fase"].split(":")[0], chico),
+                str(r["id"]), _f_fecha(r["fecha"]), Paragraph(r["fase"].split(":")[0], chico),
                 Paragraph(r["tipo"], chico), _dinero(r["monto"]),
                 Paragraph(str(r["proveedor"] or ""), chico), Paragraph(str(r["descripcion"]), chico),
             ])
@@ -2321,7 +2334,7 @@ def generar_informe_pdf() -> bytes:
     else:
         filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
         for _, r in df_pagos.sort_values(["fecha", "id"]).iterrows():
-            filas_p.append([str(r["id"]), r["fecha"], Paragraph(str(r["concepto"]), chico), _dinero(r["monto"])])
+            filas_p.append([str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["concepto"]), chico), _dinero(r["monto"])])
         filas_p.append(["", "", "TOTAL COBRADO", _dinero(total_cobrado)])
         t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
         t_p.setStyle(estilo_tabla)
@@ -2427,7 +2440,7 @@ def generar_informe_periodo_pdf(desde: str, hasta: str) -> bytes:
                             title=f"Informe por Periodo {desde} a {hasta}")
 
     encabezado = Table([
-        ["INFORME FINANCIERO POR PERIODO", f"Periodo: {desde} al {hasta}"],
+        ["INFORME FINANCIERO POR PERIODO", f"Periodo: {_f_fecha(desde)} al {_f_fecha(hasta)}"],
         ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", f"Emitido: {datetime.now():%Y-%m-%d}"],
         ["Cliente: José Manuel Robles Miguel", ""],
         ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
@@ -2446,11 +2459,11 @@ def generar_informe_periodo_pdf(desde: str, hasta: str) -> bytes:
     elems.append(Paragraph("1. Estado de Cuenta del Periodo", e["h2"]))
     t_edo = Table([
         ["Concepto", "Monto"],
-        [f"Saldo en caja al {dia_antes} (cobrado {_dinero(c['cobrado_antes'])} − gastado {_dinero(c['gastado_antes'])})",
+        [f"Saldo en caja al {_f_fecha(dia_antes)} (cobrado {_dinero(c['cobrado_antes'])} − gastado {_dinero(c['gastado_antes'])})",
          _dinero(c["saldo_inicial"])],
         ["(+) Cobrado al cliente en el periodo", _dinero(c["cobrado_per"])],
         ["(−) Gastos del periodo", _dinero(c["gastado_per"])],
-        [f"Saldo en caja al {hasta}", _dinero(c["saldo_final"])],
+        [f"Saldo en caja al {_f_fecha(hasta)}", _dinero(c["saldo_final"])],
     ], colWidths=[13 * cm, 4.5 * cm])
     t_edo.setStyle(e["tabla"])
     elems.append(t_edo)
@@ -2483,7 +2496,7 @@ def generar_informe_periodo_pdf(desde: str, hasta: str) -> bytes:
         filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
         for _, r in g_per.sort_values(["fecha", "id"]).iterrows():
             filas_g.append([
-                str(r["id"]), r["fecha"], Paragraph(str(r["fase"]).split(":")[0], e["chico"]),
+                str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["fase"]).split(":")[0], e["chico"]),
                 Paragraph(str(r["tipo"]), e["chico"]), _dinero(float(r["monto"])),
                 Paragraph(str(r["proveedor"] or ""), e["chico"]), Paragraph(str(r["descripcion"]), e["chico"]),
             ])
@@ -2500,7 +2513,7 @@ def generar_informe_periodo_pdf(desde: str, hasta: str) -> bytes:
     else:
         filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
         for _, r in p_per.sort_values(["fecha", "id"]).iterrows():
-            filas_p.append([str(r["id"]), r["fecha"], Paragraph(str(r["concepto"]), e["chico"]),
+            filas_p.append([str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["concepto"]), e["chico"]),
                             _dinero(float(r["monto"]))])
         filas_p.append(["", "", "Total cobrado en el periodo", _dinero(c["cobrado_per"])])
         t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
@@ -2529,8 +2542,8 @@ with st.expander("📆 Informe por Periodo (estado de cuenta con corte de fechas
     st.caption("Selecciona el periodo: el informe muestra el saldo acumulado al día anterior, "
                "los movimientos del periodo y el saldo al cierre.")
     cp1, cp2 = st.columns(2)
-    desde_per = cp1.date_input("Desde:", value=(datetime.now() - pd.Timedelta(days=6)).date(), key="inf_per_desde")
-    hasta_per = cp2.date_input("Hasta:", value=datetime.now().date(), key="inf_per_hasta")
+    desde_per = cp1.date_input("Desde:", format="DD-MM-YYYY", value=(datetime.now() - pd.Timedelta(days=6)).date(), key="inf_per_desde")
+    hasta_per = cp2.date_input("Hasta:", format="DD-MM-YYYY", value=datetime.now().date(), key="inf_per_hasta")
     if desde_per > hasta_per:
         st.error("La fecha inicial no puede ser posterior a la final.")
     else:
@@ -2538,10 +2551,10 @@ with st.expander("📆 Informe por Periodo (estado de cuenta con corte de fechas
         cte = _corte_periodo(d_iso, h_iso)
         dia_antes_ui = (pd.to_datetime(d_iso) - pd.Timedelta(days=1)).date().isoformat()
         mp1, mp2, mp3, mp4 = st.columns(4)
-        mp1.metric(f"Saldo al {dia_antes_ui}", f"${cte['saldo_inicial']:,.2f}")
+        mp1.metric(f"Saldo al {_f_fecha(dia_antes_ui)}", f"${cte['saldo_inicial']:,.2f}")
         mp2.metric("Cobrado en el periodo", f"${cte['cobrado_per']:,.2f}")
         mp3.metric("Gastos del periodo", f"${cte['gastado_per']:,.2f}")
-        mp4.metric(f"Saldo al {h_iso}", f"${cte['saldo_final']:,.2f}")
+        mp4.metric(f"Saldo al {_f_fecha(h_iso)}", f"${cte['saldo_final']:,.2f}")
         try:
             st.download_button(
                 "📄 Descargar Informe del Periodo (PDF)",
