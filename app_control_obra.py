@@ -398,6 +398,23 @@ def _miniatura_comprobante(nombre) -> str | None:
         from PIL import Image, ImageDraw
 
         if ruta.suffix.lower() == ".pdf":
+            # Miniatura de la primera página del PDF (cacheada); si falla, ícono genérico
+            mini_pdf = mini_dir / (ruta.stem + "_pdf.jpg")
+            try:
+                if not mini_pdf.exists() or mini_pdf.stat().st_mtime < ruta.stat().st_mtime:
+                    try:
+                        import pymupdf as _fitz
+                    except ImportError:
+                        import fitz as _fitz
+                    doc_pdf = _fitz.open(ruta)
+                    pix = doc_pdf[0].get_pixmap(dpi=60)
+                    img_pdf = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                    doc_pdf.close()
+                    img_pdf.thumbnail((480, 480))
+                    img_pdf.save(mini_pdf, quality=70, optimize=True)
+                return "data:image/jpeg;base64," + base64.b64encode(mini_pdf.read_bytes()).decode()
+            except Exception:
+                pass
             icono = mini_dir / "_icono_pdf.png"
             if not icono.exists():
                 img = Image.new("RGB", (96, 120), "#d62828")
