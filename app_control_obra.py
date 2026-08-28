@@ -175,7 +175,24 @@ div[data-testid=\"stDataFrame\"] { background:white; border:1px solid var(--bord
 .stTabs [data-baseweb=\"tab-list\"] { gap:7px; background:#eef2f6; padding:5px; border-radius:12px; }
 .stTabs [data-baseweb=\"tab\"] { border-radius:9px; padding:8px 13px; }
 .stTabs [aria-selected=\"true\"] { background:white !important; box-shadow:0 2px 8px rgba(23,50,77,.08); }
-.stButton button, .stDownloadButton button { border-radius:10px !important; font-weight:700 !important; }
+.stButton button, .stDownloadButton button, [data-testid=\"stFormSubmitButton\"] button {
+  border-radius:10px !important; font-weight:700 !important;
+  background:#ffffff !important; color:var(--brand-900) !important;
+  border:1px solid var(--border) !important;
+}
+.stButton button:hover, .stDownloadButton button:hover, [data-testid=\"stFormSubmitButton\"] button:hover {
+  background:#f2f6fa !important; color:var(--brand-700) !important; border-color:var(--brand-700) !important;
+}
+.stButton button:disabled, .stDownloadButton button:disabled, [data-testid=\"stFormSubmitButton\"] button:disabled {
+  background:#f5f7fa !important; color:#a7b3bf !important; border-color:var(--border) !important;
+}
+.stButton button[kind=\"primary\"], [data-testid=\"stBaseButton-primary\"] {
+  background:var(--brand-800) !important; color:#ffffff !important; border:none !important;
+}
+[data-testid=\"stSidebar\"] .stButton button, [data-testid=\"stSidebar\"] .stDownloadButton button {
+  background:#17364f !important; color:#eef5fa !important; border:1px solid #42627a !important;
+}
+[data-testid=\"stSidebar\"] .stButton button:hover { background:#1d4260 !important; color:#ffffff !important; }
 [data-testid=\"stAlert\"] { border-radius:12px; }
 [data-testid=\"stProgress\"] > div > div { border-radius:999px; }
 [data-testid=\"stSidebar\"] div[role=\"radiogroup\"] { gap:6px; }
