@@ -3114,8 +3114,8 @@ if ES_ADMIN and PAGINA == "Administración":
         "respaldarla, explorarla, consultarla con SQL y restaurarla."
     )
 
-    tab_resp, tab_expl, tab_sql, tab_rest = st.tabs(
-        ["💾 Respaldo", "🔎 Explorador", "⌨️ Consola SQL", "♻️ Restaurar"]
+    tab_resp, tab_expl, tab_sql, tab_rest, tab_diag = st.tabs(
+        ["💾 Respaldo", "🔎 Explorador", "⌨️ Consola SQL", "♻️ Restaurar", "🩺 Comprobantes"]
     )
 
     # --- Respaldo ---
@@ -3253,3 +3253,81 @@ if ES_ADMIN and PAGINA == "Administración":
                 DB_PATH.write_bytes(contenido)
                 st.success(f"Base restaurada. Copia de seguridad previa guardada como {copia.name}.")
                 st.rerun()
+
+    # --- Diagnóstico y reparación de comprobantes ---
+    with tab_diag:
+        st.caption(f"Almacenamiento en uso: `{COMPROBANTES_DIR}`")
+        if st.session_state.pop("msg_diag", None):
+            st.success(st.session_state.pop("msg_diag_txt", "Reparación aplicada."))
+
+        dir_existe = COMPROBANTES_DIR.exists()
+        archivos_disco = {f.name for f in COMPROBANTES_DIR.glob("*") if f.is_file()} if dir_existe else set()
+        with get_conn() as conn:
+            df_refs = pd.read_sql_query(
+                "SELECT id, fecha, monto, descripcion, comprobante FROM gastos "
+                "WHERE comprobante IS NOT NULL AND comprobante != '' ORDER BY id", conn
+            )
+        referenciados = set(df_refs["comprobante"])
+        df_falt = df_refs[~df_refs["comprobante"].isin(archivos_disco)].copy()
+        huerfanos = sorted(archivos_disco - referenciados)
+
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Gastos con comprobante", len(df_refs))
+        d2.metric("Archivos en disco", len(archivos_disco))
+        d3.metric("Referencias rotas", len(df_falt))
+        d4.metric("Archivos huérfanos", len(huerfanos))
+        if not dir_existe:
+            st.error("La carpeta de comprobantes NO existe en este almacenamiento. "
+                     "Si estás corriendo la app fuera de Railway con una base restaurada, "
+                     "los archivos se quedaron en el volume del servidor.")
+
+        if df_falt.empty:
+            st.success("✅ Todos los comprobantes referenciados existen en el almacenamiento.")
+        else:
+            st.error(f"⚠️ {len(df_falt)} gasto(s) apuntan a archivos que no están en el almacenamiento:")
+            df_falt_v = df_falt.copy()
+            df_falt_v["fecha"] = df_falt_v["fecha"].map(_f_fecha)
+            st.dataframe(
+                df_falt_v.rename(columns={"id": "Folio", "fecha": "Fecha", "monto": "Monto",
+                                          "descripcion": "Descripción", "comprobante": "Archivo esperado"})
+                .style.format({"Monto": "${:,.2f}"}),
+                hide_index=True, **FULL_WIDTH,
+            )
+
+            # Reparación 1: re-vincular con huérfanos que coincidan con el patrón gasto_{folio}.*
+            coincidencias = []
+            for _, rf in df_falt.iterrows():
+                for h in huerfanos:
+                    if h.startswith(f"gasto_{int(rf['id'])}."):
+                        coincidencias.append((h, int(rf["id"])))
+                        break
+            if coincidencias:
+                st.info(f"🔗 Encontré {len(coincidencias)} archivo(s) huérfano(s) cuyo nombre coincide "
+                        "con el folio del gasto (típico tras renumerar folios o editar la tabla).")
+                if st.button(f"🔗 Re-vincular {len(coincidencias)} coincidencia(s)", key="btn_diag_relink"):
+                    with get_conn() as conn:
+                        conn.executemany("UPDATE gastos SET comprobante = ? WHERE id = ?", coincidencias)
+                    st.session_state["msg_diag"] = True
+                    st.session_state["msg_diag_txt"] = f"{len(coincidencias)} comprobante(s) re-vinculado(s)."
+                    st.rerun()
+
+            # Reparación 2: limpiar referencias rotas para poder re-adjuntar
+            conf_diag = st.checkbox(
+                "Confirmo quitar la referencia rota de esos gastos (el gasto se conserva; "
+                "podrás volver a adjuntar el comprobante en 💸 Gastos y Pagos → Bitácora → 📎)",
+                key="conf_diag_limpiar",
+            )
+            if st.button(f"🧹 Limpiar {len(df_falt)} referencia(s) rota(s)", disabled=not conf_diag,
+                         key="btn_diag_limpiar"):
+                with get_conn() as conn:
+                    conn.executemany("UPDATE gastos SET comprobante = NULL WHERE id = ?",
+                                     [(int(i),) for i in df_falt["id"]])
+                st.session_state["msg_diag"] = True
+                st.session_state["msg_diag_txt"] = f"{len(df_falt)} referencia(s) limpiada(s). Re-adjunta los archivos cuando los tengas."
+                st.rerun()
+
+        if huerfanos:
+            with st.expander(f"📂 Archivos huérfanos en disco ({len(huerfanos)}) — existen pero ningún gasto los referencia"):
+                st.write("\n".join(f"- `{h}`" for h in huerfanos))
+                st.caption("Suelen quedar tras renumerar folios o borrar gastos editando la tabla directamente. "
+                           "Puedes re-vincularlos arriba (si coinciden por folio) o ignorarlos.")
