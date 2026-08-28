@@ -1880,24 +1880,64 @@ if ES_RESIDENTE:
 # ---------------------------------------------------------------
 # VISTA 1: DASHBOARD GENERAL
 # ---------------------------------------------------------------
-st.header("📊 Resumen Financiero del Proyecto")
-col1, col2, col3, col4 = st.columns(4)
+pct_ejercido = (total_real / total_presupuestado * 100) if total_presupuestado else 0
+pct_cobrado = (total_cobrado / total_presupuestado * 100) if total_presupuestado else 0
 
-with col1:
-    st.metric("Presupuesto Total Contratado", f"${total_presupuestado:,.2f}")
-with col2:
-    pct_ejercido = (total_real / total_presupuestado * 100) if total_presupuestado else 0
-    st.metric("Total Ejecutado (Real)", f"${total_real:,.2f}", f"{pct_ejercido:.1f}% del presupuesto", delta_color="off")
-with col3:
-    pct_cobrado = (total_cobrado / total_presupuestado * 100) if total_presupuestado else 0
-    st.metric("Cobrado al Cliente", f"${total_cobrado:,.2f}", f"{pct_cobrado:.1f}% del contrato", delta_color="off")
-with col4:
-    st.metric(
-        "Saldo en Caja (Cobrado − Gastado)",
-        f"${saldo_caja:,.2f}",
-        delta=f"${saldo_caja:,.2f}",
-        delta_color="normal",
-    )
+if not ES_ADMIN:
+    # ---------- DASHBOARD AMIGABLE PARA EL CLIENTE ----------
+    st.header("🏠 Así va tu obra")
+
+    pesos_fase = df_presupuesto.set_index("Fase")["Subtotal Costo Directo"]
+    avance_general = sum(avance_fisico.get(f, 0) * pesos_fase[f] for f in FASES) / pesos_fase.sum()
+    st.progress(min(int(round(avance_general)), 100),
+                text=f"🏗️ Avance físico general de tu casa: {avance_general:.0f}%")
+    st.caption("Promedio del avance en campo de cada etapa, ponderado por su tamaño en el presupuesto.")
+
+    cc1, cc2, cc3 = st.columns(3)
+    cc1.metric("💰 Valor de tu proyecto", f"${total_presupuestado:,.0f}")
+    cc2.metric("✅ Has pagado", f"${total_cobrado:,.0f}", f"{pct_cobrado:.0f}% del total", delta_color="off")
+    cc3.metric("🧱 Invertido en tu obra", f"${total_real:,.0f}", f"{pct_ejercido:.0f}% del presupuesto", delta_color="off")
+
+    st.subheader("📊 Avance por etapa")
+    for fase_cli in FASES:
+        pct_f = float(avance_fisico.get(fase_cli, 0))
+        nombre_corto = fase_cli.split(": ", 1)[1] if ": " in fase_cli else fase_cli
+        st.progress(min(int(round(pct_f)), 100), text=f"{nombre_corto} — {pct_f:.0f}%")
+
+    df_inf_cli = leer_informes_avance()
+    if not df_inf_cli.empty:
+        inf_ult = leer_informe_avance(int(df_inf_cli.iloc[0]["id"]))
+        st.subheader("📝 Lo más reciente de tu obra")
+        st.caption(f"Periodo: {inf_ult['periodo']} | Informe del {_f_fecha(inf_ult['fecha'])}")
+        ci1, ci2 = st.columns(2)
+        with ci1:
+            st.markdown("**✅ Lo que se hizo:**")
+            st.write(inf_ult["avances"])
+        with ci2:
+            st.markdown("**⏭️ Lo que sigue:**")
+            st.write(inf_ult["trabajos_corto"] or "—")
+
+    st.info("⬇️ Más abajo encuentras el detalle de gastos con sus comprobantes, tus pagos, "
+            "y los informes en PDF para descargar.")
+    st.markdown("---")
+
+if ES_ADMIN:
+    st.header("📊 Resumen Financiero del Proyecto")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("Presupuesto Total Contratado", f"${total_presupuestado:,.2f}")
+    with col2:
+        st.metric("Total Ejecutado (Real)", f"${total_real:,.2f}", f"{pct_ejercido:.1f}% del presupuesto", delta_color="off")
+    with col3:
+        st.metric("Cobrado al Cliente", f"${total_cobrado:,.2f}", f"{pct_cobrado:.1f}% del contrato", delta_color="off")
+    with col4:
+        st.metric(
+            "Saldo en Caja (Cobrado − Gastado)",
+            f"${saldo_caja:,.2f}",
+            delta=f"${saldo_caja:,.2f}",
+            delta_color="normal",
+        )
 
 if saldo_caja < 0 and ES_ADMIN:
     st.warning("⚠️ El gasto ejecutado supera lo cobrado al cliente. Considera solicitar la siguiente estimación.")
@@ -1907,7 +1947,8 @@ st.markdown("---")
 # ---------------------------------------------------------------
 # VISTA 2: COMPARATIVO POR DESGLOSE PRINCIPAL
 # ---------------------------------------------------------------
-st.subheader("🔍 Análisis Desglosado: Presupuesto vs. Real")
+if ES_ADMIN:
+    st.subheader("🔍 Análisis Desglosado: Presupuesto vs. Real")
 
 tabla_comparativa = pd.DataFrame({
     "Desglose": ["Materiales (Suministros)", "Mano de Obra", "Gastos Indirectos", "TOTAL"],
@@ -1926,24 +1967,26 @@ def _color_desviacion(v):
     return "color: #d62728; font-weight: bold" if v > 0 else "color: #2ca02c"
 
 
-st.dataframe(
-    tabla_comparativa.style
-    .format({
-        "Presupuesto Base": "${:,.2f}",
-        "Gasto Real Realizado": "${:,.2f}",
-        "Diferencia / Desviación": "${:,.2f}",
-        "% Ejercido": "{:.1f}%",
-    })
-    .map(_color_desviacion, subset=["Diferencia / Desviación"]),
-    **FULL_WIDTH,
-)
+if ES_ADMIN:
+    st.dataframe(
+        tabla_comparativa.style
+        .format({
+            "Presupuesto Base": "${:,.2f}",
+            "Gasto Real Realizado": "${:,.2f}",
+            "Diferencia / Desviación": "${:,.2f}",
+            "% Ejercido": "{:.1f}%",
+        })
+        .map(_color_desviacion, subset=["Diferencia / Desviación"]),
+        **FULL_WIDTH,
+    )
 
 st.markdown("---")
 
 # ---------------------------------------------------------------
 # VISTA 3: CONTROL POR FASES (FINANCIERO + FÍSICO)
 # ---------------------------------------------------------------
-st.subheader("📋 Control por Fases Cronológicas")
+if ES_ADMIN:
+    st.subheader("📋 Control por Fases Cronológicas")
 
 resumen_fases = []
 for _, row in df_presupuesto.iterrows():
@@ -1974,36 +2017,38 @@ df_resumen_fases["Alerta"] = df_resumen_fases.apply(
     lambda r: "🔴" if r["% Avance Financiero"] - r["% Avance Físico"] > 10 else "🟢", axis=1
 )
 
-st.dataframe(
-    df_resumen_fases.style.format({
-        "Presup. Materiales": "${:,.2f}",
-        "Real Materiales": "${:,.2f}",
-        "Presup. Mano Obra": "${:,.2f}",
-        "Real Mano Obra": "${:,.2f}",
-        "Indirectos Fase": "${:,.2f}",
-        "Total Presupuestado": "${:,.2f}",
-        "Total Real Fase": "${:,.2f}",
-        "% Avance Financiero": "{:.1f}%",
-        "% Avance Físico": "{:.0f}%",
-    }),
-    **FULL_WIDTH,
-)
-st.caption("🔴 = el gasto avanza más de 10 puntos por encima del avance físico (posible sobrecosto o adelanto de compras). "
-           "'Indirectos Fase' es informativo: el % de avance financiero se calcula solo contra el costo directo presupuestado (materiales + mano de obra).")
+if ES_ADMIN:
+    st.dataframe(
+        df_resumen_fases.style.format({
+            "Presup. Materiales": "${:,.2f}",
+            "Real Materiales": "${:,.2f}",
+            "Presup. Mano Obra": "${:,.2f}",
+            "Real Mano Obra": "${:,.2f}",
+            "Indirectos Fase": "${:,.2f}",
+            "Total Presupuestado": "${:,.2f}",
+            "Total Real Fase": "${:,.2f}",
+            "% Avance Financiero": "{:.1f}%",
+            "% Avance Físico": "{:.0f}%",
+        }),
+        **FULL_WIDTH,
+    )
+    st.caption("🔴 = el gasto avanza más de 10 puntos por encima del avance físico (posible sobrecosto o adelanto de compras). "
+               "'Indirectos Fase' es informativo: el % de avance financiero se calcula solo contra el costo directo presupuestado (materiales + mano de obra).")
 
 df_chart = pd.DataFrame({
     "Fase": [f.split(":")[0] for f in df_resumen_fases["Fase de Obra"]],
     "Presupuesto": df_resumen_fases["Total Presupuestado"].values,
     "Real": df_resumen_fases["Total Real Fase"].values,
 }).set_index("Fase")
-st.bar_chart(df_chart, **FULL_WIDTH)
+if ES_ADMIN:
+    st.bar_chart(df_chart, **FULL_WIDTH)
 
 st.markdown("---")
 
 # ---------------------------------------------------------------
 # VISTA 4: BITÁCORAS (GASTOS Y PAGOS)
 # ---------------------------------------------------------------
-st.subheader("📜 Bitácoras del Proyecto")
+st.subheader("📜 Bitácoras del Proyecto" if ES_ADMIN else "🧾 Movimientos de tu obra (gastos y pagos)")
 
 tab_gastos, tab_pagos = st.tabs(["Gastos y destajos", "Pagos del cliente"])
 
