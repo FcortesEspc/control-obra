@@ -1,6 +1,6 @@
 """
 Sistema de Control de Ejecución de Obra - Residencia JE132
-Versión 3.0:
+Versión 4.2:
   - ROLES DE USUARIO:
       * Administrador (ADMIN_PASSWORD): captura gastos/pagos, elimina registros,
         actualiza avance físico y adjunta comprobantes.
@@ -21,6 +21,7 @@ Variables de entorno en Railway:
 Ejecutar con:  streamlit run app_control_obra.py
 """
 
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -177,6 +178,14 @@ div[data-testid=\"stDataFrame\"] { background:white; border:1px solid var(--bord
 .stButton button, .stDownloadButton button { border-radius:10px !important; font-weight:700 !important; }
 [data-testid=\"stAlert\"] { border-radius:12px; }
 [data-testid=\"stProgress\"] > div > div { border-radius:999px; }
+[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] { gap:6px; }
+[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label {
+  padding:9px 10px; border-radius:10px; transition:background .15s ease;
+}
+[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label:hover { background:rgba(255,255,255,.07); }
+[data-testid=\"stSidebar\"] div[role=\"radiogroup\"] label:has(input:checked) {
+  background:rgba(255,255,255,.12); box-shadow:inset 3px 0 0 var(--accent);
+}
 .obra-note { background:#fff; border:1px solid var(--border); border-left:4px solid var(--accent); border-radius:10px; padding:12px 14px; color:var(--muted); font-size:.88rem; }
 @media (max-width: 900px) {
   .block-container { padding-left:1rem; padding-right:1rem; }
@@ -897,28 +906,54 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------
-# PANEL LATERAL
+# PANEL LATERAL / NAVEGACIÓN V4.1
 # ---------------------------------------------------------------
 rol_etiquetas = {"admin": "👷 Administrador", "residente": "📐 Residente de Obra", "cliente": "👤 Cliente (solo consulta)"}
 rol_texto = rol_etiquetas.get(st.session_state.get("rol", "admin"), "👷 Administrador")
 st.sidebar.markdown("### CONTROL DE OBRA")
 st.sidebar.caption("Residencia JE132")
 st.sidebar.markdown(f"**Sesión:** {rol_texto}")
+
+if ES_ADMIN:
+    paginas = ["Inicio", "Gastos y Pagos", "Compras", "Avance de Obra", "Bitácora", "Informes", "Administración"]
+elif ES_RESIDENTE:
+    paginas = ["Compras", "Informes"]
+else:
+    paginas = ["Inicio", "Avance de Obra", "Bitácora", "Informes"]
+
+pagina_iconos = {
+    "Inicio": "⌂",
+    "Gastos y Pagos": "$",
+    "Compras": "▣",
+    "Avance de Obra": "↗",
+    "Bitácora": "≡",
+    "Informes": "□",
+    "Administración": "⚙",
+}
+PAGINA = st.sidebar.radio(
+    "Navegación",
+    paginas,
+    format_func=lambda x: f"{pagina_iconos.get(x, '•')}  {x}",
+    key="nav_principal_v42",
+    label_visibility="collapsed",
+)
+
 if (os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
         or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")):
-    if st.sidebar.button("Cerrar sesión"):
+    st.sidebar.markdown("---")
+    if st.sidebar.button("Cerrar sesión", use_container_width=True):
         st.session_state.pop("rol", None)
         st.session_state.pop("autenticado", None)
         st.rerun()
+
 st.sidebar.markdown("---")
+st.sidebar.caption("DACAM × HOGAR 911 · JE132")
 
-if ES_ADMIN:
-    st.sidebar.header("📝 Captura de movimientos")
-
-    # --- Registro de gastos (con comprobante) ---
+# Los formularios de captura aparecen únicamente en el módulo correspondiente.
+if ES_ADMIN and PAGINA == "Gastos y Pagos":
+    st.sidebar.header("Captura de movimientos")
     with st.sidebar.expander("Registrar gasto de obra", expanded=True):
         fase_seleccionada = st.selectbox("Fase:", FASES + [FASE_INDIRECTOS], key="g_fase")
-
         if fase_seleccionada == FASE_INDIRECTOS:
             tipo_gasto = FASE_INDIRECTOS
             st.caption("Indirectos generales del proyecto, sin fase específica.")
@@ -926,7 +961,6 @@ if ES_ADMIN:
             tipo_gasto = st.selectbox("Tipo de desglose:", TIPOS_DIRECTOS + [FASE_INDIRECTOS], key="g_tipo")
             if tipo_gasto == FASE_INDIRECTOS:
                 st.caption("Gasto indirecto asociado a esta fase (supervisión, gestión, trámites, etc.).")
-
         with st.form("form_gasto", clear_on_submit=True):
             fecha_gasto = st.date_input("Fecha del gasto:", format="DD-MM-YYYY", value=datetime.now().date())
             monto_gasto = st.number_input("Monto ($ MXN):", min_value=0.0, step=500.0)
@@ -952,7 +986,6 @@ if ES_ADMIN:
                     else:
                         st.success(f"¡Gasto #{nuevo_id} registrado!")
 
-    # --- Registro de pagos del cliente ---
     with st.sidebar.expander("Registrar pago del cliente"):
         st.caption("Anticipo, estimaciones y pagos parciales. El saldo en caja se calcula contra estos cobros.")
         with st.form("form_pago", clear_on_submit=True):
@@ -968,8 +1001,9 @@ if ES_ADMIN:
                     insertar_pago(fecha_pago.isoformat(), concepto_pago, monto_pago)
                     st.success("¡Pago registrado!")
 
-    # --- Avance físico ---
-    with st.sidebar.expander("Actualizar avance físico"):
+if ES_ADMIN and PAGINA == "Avance de Obra":
+    st.sidebar.header("Avance físico")
+    with st.sidebar.expander("Actualizar avance físico", expanded=True):
         st.caption("Porcentaje real de ejecución en campo por fase.")
         avance_actual_form = leer_avance_fisico()
         with st.form("form_avance"):
@@ -982,10 +1016,11 @@ if ES_ADMIN:
             if st.form_submit_button("Guardar avance"):
                 guardar_avance_fisico({f: float(p) for f, p in nuevos_avances.items()})
                 st.success("Avance actualizado.")
-elif ES_RESIDENTE:
-    st.sidebar.info("Modo obra: levanta requisiciones de material, genera solicitudes de cotización y captura las cotizaciones de los proveedores.")
-else:
-    st.sidebar.info("Estás en modo consulta. Puedes revisar el avance financiero, físico y los comprobantes del proyecto.")
+
+if ES_RESIDENTE:
+    st.sidebar.info("Modo obra: levanta requisiciones, solicita cotizaciones y captura propuestas de proveedores.")
+elif not ES_ADMIN:
+    st.sidebar.info("Modo consulta: revisa avance, bitácora e informes del proyecto.")
 
 # ---------------------------------------------------------------
 # LECTURA DE DATOS
@@ -1002,6 +1037,17 @@ total_real = real_materiales + real_mano_obra + real_indirectos
 total_cobrado = df_pagos["monto"].sum() if not df_pagos.empty else 0.0
 saldo_caja = total_cobrado - total_real
 
+# Indicadores globales reutilizados por distintos módulos.
+pct_ejercido = (total_real / total_presupuestado * 100) if total_presupuestado else 0.0
+pct_cobrado = (total_cobrado / total_presupuestado * 100) if total_presupuestado else 0.0
+pesos_fase_global = df_presupuesto.set_index("Fase")["Subtotal Costo Directo"]
+if pesos_fase_global.sum():
+    avance_general = sum(
+        avance_fisico.get(f, 0) * pesos_fase_global[f] for f in FASES
+    ) / pesos_fase_global.sum()
+else:
+    avance_general = 0.0
+
 # ---------------------------------------------------------------
 # MÓDULO: REQUISICIONES, COTIZACIONES Y ÓRDENES DE COMPRA
 # ---------------------------------------------------------------
@@ -1017,6 +1063,232 @@ def folio_req(rid: int) -> str:
 
 def folio_oc_num(oid: int) -> str:
     return f"OC-JE132-{int(oid):03d}"
+
+
+def construir_tabla_comparativa() -> pd.DataFrame:
+    """Desglose Presupuesto vs. Real. Compartido entre Inicio e Informes."""
+    t = pd.DataFrame({
+        "Desglose": ["Materiales (Suministros)", "Mano de Obra", "Gastos Indirectos", "TOTAL"],
+        "Presupuesto Base": [p_materiales, p_mano_obra, p_indirectos, total_presupuestado],
+        "Gasto Real Realizado": [real_materiales, real_mano_obra, real_indirectos, total_real],
+    })
+    t["Diferencia / Desviación"] = t["Gasto Real Realizado"] - t["Presupuesto Base"]
+    t["% Ejercido"] = (t["Gasto Real Realizado"] / t["Presupuesto Base"] * 100).fillna(0)
+    return t
+
+
+def construir_resumen_fases() -> pd.DataFrame:
+    """Control por fases con avances y Estado. Compartido entre Avance de Obra e Informes."""
+    filas = []
+    for _, row in df_presupuesto.iterrows():
+        fase_name = row["Fase"]
+        en_fase = df_gastos["fase"] == fase_name
+        r_mat = df_gastos.loc[en_fase & (df_gastos["tipo"] == "Materiales"), "monto"].sum()
+        r_mo = df_gastos.loc[en_fase & (df_gastos["tipo"] == "Mano de Obra"), "monto"].sum()
+        r_ind = df_gastos.loc[en_fase & (df_gastos["tipo"] == FASE_INDIRECTOS), "monto"].sum()
+        total_fase_real = r_mat + r_mo
+        presup_fase = row["Subtotal Costo Directo"]
+        filas.append({
+            "Fase de Obra": fase_name,
+            "Semanas Est.": row["Semanas"],
+            "Presup. Materiales": row["Materiales"],
+            "Real Materiales": r_mat,
+            "Presup. Mano Obra": row["Mano de Obra"],
+            "Real Mano Obra": r_mo,
+            "Indirectos Fase": r_ind,
+            "Total Presupuestado": presup_fase,
+            "Total Real Fase": total_fase_real,
+            "% Avance Financiero": (total_fase_real / presup_fase * 100) if presup_fase else 0,
+            "% Avance Físico": avance_fisico.get(fase_name, 0),
+        })
+    df = pd.DataFrame(filas)
+    df["Estado"] = df.apply(
+        lambda r: _estado_desviacion(r["% Avance Financiero"] - r["% Avance Físico"])[0], axis=1
+    )
+    return df
+
+
+def leer_ordenes_compra_resumen() -> pd.DataFrame:
+    """Órdenes de compra con proveedor y estatus financiero para el tablero ejecutivo."""
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT o.id, o.fecha, o.total, o.gasto_id, o.requisicion_id,
+                   c.proveedor, r.fase
+            FROM ordenes_compra o
+            JOIN cotizaciones c ON c.id = o.cotizacion_id
+            JOIN requisiciones r ON r.id = o.requisicion_id
+            ORDER BY o.fecha DESC, o.id DESC
+            """,
+            conn,
+        )
+
+
+def _serie_fechas(df: pd.DataFrame, columna: str = "fecha") -> pd.Series:
+    if df is None or df.empty or columna not in df.columns:
+        return pd.Series(dtype="datetime64[ns]")
+    return pd.to_datetime(df[columna], errors="coerce").dropna()
+
+
+def construir_curva_s(
+    df_gastos_: pd.DataFrame,
+    df_pagos_: pd.DataFrame,
+    df_presupuesto_: pd.DataFrame,
+    informes_: pd.DataFrame,
+    avance_actual_: dict,
+    total_presupuesto_: float,
+) -> pd.DataFrame:
+    """Construye Curva S de referencia, financiero real y cortes físicos disponibles.
+
+    La referencia programada distribuye el presupuesto de cada fase de manera uniforme
+    entre las semanas estimadas del presupuesto base; los indirectos se distribuyen en
+    todo el horizonte. El origen temporal es el primer movimiento/informe registrado.
+    """
+    candidatos = []
+    for df_ in (df_gastos_, df_pagos_, informes_):
+        fechas = _serie_fechas(df_)
+        if not fechas.empty:
+            candidatos.append(fechas.min())
+    inicio = min(candidatos).normalize() if candidatos else pd.Timestamp.today().normalize()
+
+    # Horizonte programado a partir del rango de semanas de cada fase.
+    rangos = []
+    for _, row in df_presupuesto_.iterrows():
+        try:
+            a, b = str(row["Semanas"]).split("-", 1)
+            rangos.append((int(a), int(b), float(row["Subtotal Costo Directo"])))
+        except Exception:
+            continue
+    max_semana = max((b for _, b, _ in rangos), default=1)
+    semanal = {sem: 0.0 for sem in range(1, max_semana + 1)}
+    for a, b, monto in rangos:
+        duracion = max(b - a + 1, 1)
+        for sem in range(a, b + 1):
+            semanal[sem] = semanal.get(sem, 0.0) + monto / duracion
+    indirectos_restantes = max(float(total_presupuesto_) - float(df_presupuesto_["Subtotal Costo Directo"].sum()), 0.0)
+    if max_semana:
+        for sem in semanal:
+            semanal[sem] += indirectos_restantes / max_semana
+
+    programado = []
+    acumulado = 0.0
+    for sem in range(1, max_semana + 1):
+        acumulado += semanal.get(sem, 0.0)
+        programado.append({
+            "fecha": inicio + pd.Timedelta(weeks=sem - 1),
+            "Programado (%)": (acumulado / total_presupuesto_ * 100) if total_presupuesto_ else 0.0,
+        })
+    df_prog = pd.DataFrame(programado)
+
+    # Ejecución financiera real acumulada por fecha.
+    if df_gastos_ is not None and not df_gastos_.empty:
+        fin = df_gastos_.copy()
+        fin["fecha_dt"] = pd.to_datetime(fin["fecha"], errors="coerce")
+        fin = fin.dropna(subset=["fecha_dt"]).groupby("fecha_dt", as_index=False)["monto"].sum().sort_values("fecha_dt")
+        fin["Financiero real (%)"] = fin["monto"].cumsum() / total_presupuesto_ * 100 if total_presupuesto_ else 0.0
+        df_fin = fin[["fecha_dt", "Financiero real (%)"]].rename(columns={"fecha_dt": "fecha"})
+    else:
+        df_fin = pd.DataFrame(columns=["fecha", "Financiero real (%)"])
+
+    # Avance físico histórico: usa snapshots guardados en informes; no interpola datos inexistentes.
+    pesos = df_presupuesto_.set_index("Fase")["Subtotal Costo Directo"]
+    peso_total = float(pesos.sum())
+    fisicos = []
+    if informes_ is not None and not informes_.empty:
+        for _, infrow in informes_.sort_values("fecha").iterrows():
+            try:
+                inf = leer_informe_avance(int(infrow["id"]))
+                snapshot = json.loads(inf.get("avance_json") or "{}")
+                pct = sum(float(snapshot.get(f, 0)) * float(pesos.get(f, 0)) for f in FASES) / peso_total if peso_total else 0.0
+                fisicos.append({"fecha": pd.to_datetime(inf["fecha"]), "Físico reportado (%)": pct})
+            except Exception:
+                continue
+    pct_actual = sum(float(avance_actual_.get(f, 0)) * float(pesos.get(f, 0)) for f in FASES) / peso_total if peso_total else 0.0
+    fisicos.append({"fecha": pd.Timestamp.today().normalize(), "Físico reportado (%)": pct_actual})
+    df_fis = pd.DataFrame(fisicos).dropna(subset=["fecha"]).drop_duplicates("fecha", keep="last")
+
+    fechas_union = sorted(set(pd.to_datetime(df_prog.get("fecha", pd.Series(dtype="datetime64[ns]"))).tolist()) |
+                         set(pd.to_datetime(df_fin.get("fecha", pd.Series(dtype="datetime64[ns]"))).tolist()) |
+                         set(pd.to_datetime(df_fis.get("fecha", pd.Series(dtype="datetime64[ns]"))).tolist()))
+    if not fechas_union:
+        return pd.DataFrame(columns=["Programado (%)", "Financiero real (%)", "Físico reportado (%)"])
+
+    base = pd.DataFrame(index=pd.DatetimeIndex(fechas_union, name="Fecha"))
+    if not df_prog.empty:
+        base = base.join(df_prog.set_index("fecha")["Programado (%)"])
+        base["Programado (%)"] = base["Programado (%)"].interpolate(method="time").ffill().bfill().clip(lower=0, upper=100)
+    else:
+        base["Programado (%)"] = 0.0
+    if not df_fin.empty:
+        base = base.join(df_fin.set_index("fecha")["Financiero real (%)"])
+        base["Financiero real (%)"] = base["Financiero real (%)"].ffill().fillna(0.0)
+    else:
+        base["Financiero real (%)"] = 0.0
+    if not df_fis.empty:
+        base = base.join(df_fis.set_index("fecha")["Físico reportado (%)"])
+    else:
+        base["Físico reportado (%)"] = pd.NA
+    return base.sort_index()
+
+
+def construir_flujo_caja_mensual(df_pagos_: pd.DataFrame, df_gastos_: pd.DataFrame) -> pd.DataFrame:
+    """Resume cobros, gastos y saldo acumulado por mes."""
+    def _mensual(df_: pd.DataFrame, valor: str, salida: str) -> pd.DataFrame:
+        if df_ is None or df_.empty:
+            return pd.DataFrame(columns=["Mes", salida])
+        aux = df_.copy()
+        aux["fecha_dt"] = pd.to_datetime(aux["fecha"], errors="coerce")
+        aux = aux.dropna(subset=["fecha_dt"])
+        aux["Mes"] = aux["fecha_dt"].dt.to_period("M").dt.to_timestamp()
+        return aux.groupby("Mes", as_index=False)[valor].sum().rename(columns={valor: salida})
+
+    cobros = _mensual(df_pagos_, "monto", "Cobros")
+    gastos = _mensual(df_gastos_, "monto", "Gastos")
+    flujo = pd.merge(cobros, gastos, on="Mes", how="outer").fillna(0).sort_values("Mes")
+    if flujo.empty:
+        return pd.DataFrame(columns=["Mes", "Cobros", "Gastos", "Flujo neto", "Saldo acumulado"])
+    flujo["Flujo neto"] = flujo["Cobros"] - flujo["Gastos"]
+    flujo["Saldo acumulado"] = flujo["Flujo neto"].cumsum()
+    return flujo
+
+
+def generar_alertas_ejecutivas(
+    saldo_caja_: float,
+    comprometido_pendiente_: float,
+    avance_general_: float,
+    pct_ejercido_: float,
+    df_presupuesto_: pd.DataFrame,
+    df_gastos_: pd.DataFrame,
+    avance_fisico_: dict,
+) -> list[tuple[str, str]]:
+    """Reglas sencillas para señalar riesgos financieros y desviaciones de avance."""
+    alertas: list[tuple[str, str]] = []
+    saldo_proyectado = saldo_caja_ - comprometido_pendiente_
+    if saldo_caja_ < 0:
+        alertas.append(("error", f"Déficit de caja actual: ${abs(saldo_caja_):,.0f}."))
+    elif saldo_proyectado < 0:
+        alertas.append(("warning", f"Las OC pendientes llevarían la caja a ${saldo_proyectado:,.0f}."))
+    if comprometido_pendiente_ > 0:
+        alertas.append(("info", f"Comprometido en OC aún no vinculado a gasto: ${comprometido_pendiente_:,.0f}."))
+
+    brecha_global = pct_ejercido_ - avance_general_
+    if brecha_global > 15:
+        alertas.append(("warning", f"El avance financiero supera al físico en {brecha_global:.1f} puntos porcentuales."))
+
+    peor = None
+    for _, row in df_presupuesto_.iterrows():
+        fase = row["Fase"]
+        presup = float(row["Subtotal Costo Directo"])
+        real = float(df_gastos_.loc[(df_gastos_["fase"] == fase) & (df_gastos_["tipo"].isin(TIPOS_DIRECTOS)), "monto"].sum()) if not df_gastos_.empty else 0.0
+        fin = real / presup * 100 if presup else 0.0
+        fis = float(avance_fisico_.get(fase, 0))
+        brecha = fin - fis
+        if peor is None or brecha > peor[0]:
+            peor = (brecha, fase, fin, fis)
+    if peor and peor[0] > 15:
+        nombre = peor[1].split(": ", 1)[-1]
+        alertas.append(("warning", f"Revisar {nombre}: financiero {peor[2]:.0f}% vs físico {peor[3]:.0f}%."))
+    return alertas[:5]
 
 
 def _membrete_pdf(canvas, doc):
@@ -1982,792 +2254,859 @@ def seccion_informes_avance(puede_editar: bool):
         st.write(inf["observaciones"])
 
 
-if ES_ADMIN or ES_RESIDENTE:
+if PAGINA == "Compras" and (ES_ADMIN or ES_RESIDENTE):
     seccion_requisiciones()
-if ES_RESIDENTE:
+    st.stop()
+
+if ES_RESIDENTE and PAGINA == "Informes":
     seccion_informes_avance(puede_editar=True)
     st.stop()
 
-# ---------------------------------------------------------------
-# VISTA 1: DASHBOARD GENERAL
-# ---------------------------------------------------------------
-pct_ejercido = (total_real / total_presupuestado * 100) if total_presupuestado else 0
-pct_cobrado = (total_cobrado / total_presupuestado * 100) if total_presupuestado else 0
-pesos_fase_global = df_presupuesto.set_index("Fase")["Subtotal Costo Directo"]
-if pesos_fase_global.sum():
-    avance_general = sum(avance_fisico.get(f, 0) * pesos_fase_global[f] for f in FASES) / pesos_fase_global.sum()
-else:
-    avance_general = 0.0
+if PAGINA == "Gastos y Pagos" and ES_ADMIN:
+    _titulo_seccion("Operación", "Gastos y pagos")
+    st.caption("Registra movimientos desde el panel lateral y consulta aquí el efecto inmediato en caja y ejecución.")
+    cg1, cg2, cg3, cg4 = st.columns(4)
+    cg1.markdown(_kpi_html("Cobrado acumulado", f"${total_cobrado:,.0f}", "Pagos recibidos del cliente", "ok"), unsafe_allow_html=True)
+    cg2.markdown(_kpi_html("Gasto ejecutado", f"${total_real:,.0f}", "Costo real registrado", "warn" if total_real > total_cobrado else "ok"), unsafe_allow_html=True)
+    cg3.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.0f}", "Cobrado menos gasto", "danger" if saldo_caja < 0 else "ok"), unsafe_allow_html=True)
+    cg4.markdown(_kpi_html("Movimientos", f"{len(df_gastos) + len(df_pagos):,}", "Gastos + pagos", "ok"), unsafe_allow_html=True)
 
-if not ES_ADMIN:
-    # ---------- DASHBOARD AMIGABLE PARA EL CLIENTE ----------
-    _titulo_seccion("Tu proyecto", "Así va tu obra")
+    st.markdown("#### Movimientos recientes")
+    ult_g = df_gastos.sort_values(["fecha", "id"], ascending=False).head(8).copy() if not df_gastos.empty else df_gastos.copy()
+    ult_p = df_pagos.sort_values(["fecha", "id"], ascending=False).head(8).copy() if not df_pagos.empty else df_pagos.copy()
+    tg, tp = st.tabs(["Gastos recientes", "Pagos recientes"])
+    with tg:
+        if ult_g.empty:
+            st.info("Aún no hay gastos registrados.")
+        else:
+            cols_g = [c for c in ["id", "fecha", "fase", "tipo", "monto", "proveedor", "descripcion"] if c in ult_g.columns]
+            st.dataframe(ult_g[cols_g], hide_index=True, **FULL_WIDTH)
+    with tp:
+        if ult_p.empty:
+            st.info("Aún no hay pagos registrados.")
+        else:
+            cols_p = [c for c in ["id", "fecha", "concepto", "monto"] if c in ult_p.columns]
+            st.dataframe(ult_p[cols_p], hide_index=True, **FULL_WIDTH)
 
-    st.progress(min(int(round(avance_general)), 100),
-                text=f"Avance físico general: {avance_general:.0f}%")
-    st.caption("Promedio del avance en campo de cada etapa, ponderado por su tamaño en el presupuesto.")
+if PAGINA == "Inicio":
+    # Indicadores ejecutivos V4.2
+    df_ordenes_resumen = leer_ordenes_compra_resumen()
+    total_oc_emitido = float(df_ordenes_resumen["total"].sum()) if not df_ordenes_resumen.empty else 0.0
+    oc_vinculadas = df_ordenes_resumen[df_ordenes_resumen["gasto_id"].notna()] if not df_ordenes_resumen.empty else pd.DataFrame()
+    oc_pendientes = df_ordenes_resumen[df_ordenes_resumen["gasto_id"].isna()] if not df_ordenes_resumen.empty else pd.DataFrame()
+    total_oc_vinculado = float(oc_vinculadas["total"].sum()) if not oc_vinculadas.empty else 0.0
+    comprometido_pendiente = float(oc_pendientes["total"].sum()) if not oc_pendientes.empty else 0.0
+    saldo_proyectado = saldo_caja - comprometido_pendiente
+    df_informes_curva = leer_informes_avance()
+    df_curva_s = construir_curva_s(
+        df_gastos, df_pagos, df_presupuesto, df_informes_curva, avance_fisico, total_presupuestado
+    )
+    df_flujo_mensual = construir_flujo_caja_mensual(df_pagos, df_gastos)
+    alertas_exec = generar_alertas_ejecutivas(
+        saldo_caja, comprometido_pendiente, avance_general, pct_ejercido,
+        df_presupuesto, df_gastos, avance_fisico,
+    )
 
-    cc1, cc2, cc3 = st.columns(3)
-    cc1.markdown(_kpi_html("Valor del proyecto", f"${total_presupuestado:,.0f}", "Presupuesto contratado"), unsafe_allow_html=True)
-    cc2.markdown(_kpi_html("Pagado", f"${total_cobrado:,.0f}", f"{pct_cobrado:.0f}% del total", "ok"), unsafe_allow_html=True)
-    cc3.markdown(_kpi_html("Invertido en obra", f"${total_real:,.0f}", f"{pct_ejercido:.0f}% del presupuesto", "ok"), unsafe_allow_html=True)
+    # ---------------------------------------------------------------
+    # VISTA 1: DASHBOARD GENERAL
+    # ---------------------------------------------------------------
+    if not ES_ADMIN:
+        # ---------- DASHBOARD AMIGABLE PARA EL CLIENTE ----------
+        _titulo_seccion("Tu proyecto", "Así va tu obra")
 
-    st.subheader("📊 Avance por etapa")
-    for fase_cli in FASES:
-        pct_f = float(avance_fisico.get(fase_cli, 0))
-        nombre_corto = fase_cli.split(": ", 1)[1] if ": " in fase_cli else fase_cli
-        st.progress(min(int(round(pct_f)), 100), text=f"{nombre_corto} — {pct_f:.0f}%")
+        st.progress(min(int(round(avance_general)), 100),
+                    text=f"Avance físico general: {avance_general:.0f}%")
+        st.caption("Promedio del avance en campo de cada etapa, ponderado por su tamaño en el presupuesto.")
 
-    df_inf_cli = leer_informes_avance()
-    if not df_inf_cli.empty:
-        inf_ult = leer_informe_avance(int(df_inf_cli.iloc[0]["id"]))
-        st.subheader("📝 Lo más reciente de tu obra")
-        st.caption(f"Periodo: {inf_ult['periodo']} | Informe del {_f_fecha(inf_ult['fecha'])}")
-        ci1, ci2 = st.columns(2)
-        with ci1:
-            st.markdown("**✅ Lo que se hizo:**")
-            st.write(inf_ult["avances"])
-        with ci2:
-            st.markdown("**⏭️ Lo que sigue:**")
-            st.write(inf_ult["trabajos_corto"] or "—")
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.markdown(_kpi_html("Valor del proyecto", f"${total_presupuestado:,.0f}", "Presupuesto contratado"), unsafe_allow_html=True)
+        cc2.markdown(_kpi_html("Pagado", f"${total_cobrado:,.0f}", f"{pct_cobrado:.0f}% del total", "ok"), unsafe_allow_html=True)
+        cc3.markdown(_kpi_html("Invertido en obra", f"${total_real:,.0f}", f"{pct_ejercido:.0f}% del presupuesto", "ok"), unsafe_allow_html=True)
 
-    st.info("⬇️ Más abajo encuentras el detalle de gastos con sus comprobantes, tus pagos, "
-            "y los informes en PDF para descargar.")
+        st.subheader("📊 Avance por etapa")
+        for fase_cli in FASES:
+            pct_f = float(avance_fisico.get(fase_cli, 0))
+            nombre_corto = fase_cli.split(": ", 1)[1] if ": " in fase_cli else fase_cli
+            st.progress(min(int(round(pct_f)), 100), text=f"{nombre_corto} — {pct_f:.0f}%")
+
+        df_inf_cli = leer_informes_avance()
+        if not df_inf_cli.empty:
+            inf_ult = leer_informe_avance(int(df_inf_cli.iloc[0]["id"]))
+            st.subheader("📝 Lo más reciente de tu obra")
+            st.caption(f"Periodo: {inf_ult['periodo']} | Informe del {_f_fecha(inf_ult['fecha'])}")
+            ci1, ci2 = st.columns(2)
+            with ci1:
+                st.markdown("**✅ Lo que se hizo:**")
+                st.write(inf_ult["avances"])
+            with ci2:
+                st.markdown("**⏭️ Lo que sigue:**")
+                st.write(inf_ult["trabajos_corto"] or "—")
+
+        st.info("⬇️ Más abajo encuentras el detalle de gastos con sus comprobantes, tus pagos, "
+                "y los informes en PDF para descargar.")
+        st.markdown("---")
+
+    if ES_ADMIN:
+        _titulo_seccion("Resumen ejecutivo", "Situación integral del proyecto")
+        estado_caja, clase_caja = (("Caja disponible", "ok") if saldo_caja >= 0 else ("Déficit de caja", "danger"))
+        col1, col2, col3, col4 = st.columns(4)
+        col1.markdown(_kpi_html("Presupuesto contratado", f"${total_presupuestado:,.0f}", "Base contractual vigente"), unsafe_allow_html=True)
+        col2.markdown(_kpi_html("Ejecutado real", f"${total_real:,.0f}", f"{pct_ejercido:.1f}% del presupuesto", "warn" if pct_ejercido > 85 else "ok"), unsafe_allow_html=True)
+        col3.markdown(_kpi_html("Avance físico", f"{avance_general:.0f}%", "Promedio ponderado de fases", "ok"), unsafe_allow_html=True)
+        col4.markdown(_kpi_html("Cobrado al cliente", f"${total_cobrado:,.0f}", f"{pct_cobrado:.1f}% del contrato", "ok"), unsafe_allow_html=True)
+
+        col5, col6, col7, col8 = st.columns(4)
+        col5.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.0f}", estado_caja, clase_caja), unsafe_allow_html=True)
+        col6.markdown(_kpi_html("Comprometido en OC", f"${comprometido_pendiente:,.0f}", f"{len(oc_pendientes)} órdenes pendientes", "warn" if comprometido_pendiente else "ok"), unsafe_allow_html=True)
+        col7.markdown(_kpi_html("Caja proyectada", f"${saldo_proyectado:,.0f}", "Caja menos OC pendientes", "danger" if saldo_proyectado < 0 else "ok"), unsafe_allow_html=True)
+        col8.markdown(_kpi_html("OC emitidas", f"${total_oc_emitido:,.0f}", f"{len(df_ordenes_resumen)} órdenes registradas", "ok"), unsafe_allow_html=True)
+        st.progress(min(int(round(avance_general)), 100), text=f"Avance físico general del proyecto: {avance_general:.0f}%")
+
+        st.markdown("#### Alertas ejecutivas")
+        if not alertas_exec:
+            st.success("Sin alertas críticas con la información registrada al momento.")
+        else:
+            for nivel, mensaje in alertas_exec:
+                getattr(st, nivel)(mensaje)
+
+        st.markdown("---")
+        _titulo_seccion("Curva S", "Programado vs. avance físico y financiero")
+        st.caption(
+            "La línea programada es una referencia construida con las semanas estimadas del presupuesto base. "
+            "El avance físico histórico usa únicamente los cortes guardados en los informes de avance; no se inventan puntos intermedios."
+        )
+        if df_curva_s.empty:
+            st.info("Aún no hay datos suficientes para construir la Curva S.")
+        else:
+            st.line_chart(df_curva_s, **FULL_WIDTH)
+
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            st.markdown("#### Flujo de caja")
+            if df_flujo_mensual.empty:
+                st.info("Aún no hay movimientos suficientes para mostrar el flujo mensual.")
+            else:
+                df_cf = df_flujo_mensual.set_index("Mes")[["Cobros", "Gastos"]]
+                st.bar_chart(df_cf, **FULL_WIDTH)
+                st.caption(f"Saldo acumulado registrado: ${float(df_flujo_mensual.iloc[-1]['Saldo acumulado']):,.0f}.")
+        with gc2:
+            st.markdown("#### Compromisos de compra")
+            if df_ordenes_resumen.empty:
+                st.info("Aún no hay órdenes de compra emitidas.")
+            else:
+                comp_tab = pd.DataFrame({
+                    "Concepto": ["OC emitidas", "OC vinculadas a gasto", "Comprometido pendiente"],
+                    "Monto": [total_oc_emitido, total_oc_vinculado, comprometido_pendiente],
+                }).set_index("Concepto")
+                st.bar_chart(comp_tab, **FULL_WIDTH)
+                if not oc_pendientes.empty:
+                    detalle_oc = oc_pendientes[["id", "fecha", "proveedor", "fase", "total"]].copy()
+                    detalle_oc["OC"] = detalle_oc["id"].map(folio_oc_num)
+                    detalle_oc = detalle_oc[["OC", "fecha", "proveedor", "fase", "total"]].rename(
+                        columns={"fecha": "Fecha", "proveedor": "Proveedor", "fase": "Fase", "total": "Total"}
+                    )
+                    st.dataframe(
+                        detalle_oc.style.format({"Total": "${:,.2f}"}),
+                        use_container_width=True, hide_index=True,
+                    )
+
+    if saldo_caja < 0 and ES_ADMIN:
+        st.warning("El gasto ejecutado supera lo cobrado al cliente. Considera revisar el calendario de cobros.")
+
     st.markdown("---")
 
-if ES_ADMIN:
-    _titulo_seccion("Resumen ejecutivo", "Situación financiera del proyecto")
-    estado_caja, clase_caja = (("Caja disponible", "ok") if saldo_caja >= 0 else ("Déficit de caja", "danger"))
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.markdown(_kpi_html("Presupuesto contratado", f"${total_presupuestado:,.0f}", "Base contractual vigente"), unsafe_allow_html=True)
-    col2.markdown(_kpi_html("Ejecutado real", f"${total_real:,.0f}", f"{pct_ejercido:.1f}% del presupuesto", "warn" if pct_ejercido > 85 else "ok"), unsafe_allow_html=True)
-    col3.markdown(_kpi_html("Avance físico", f"{avance_general:.0f}%", "Promedio ponderado de fases", "ok"), unsafe_allow_html=True)
-    col4.markdown(_kpi_html("Cobrado al cliente", f"${total_cobrado:,.0f}", f"{pct_cobrado:.1f}% del contrato", "ok"), unsafe_allow_html=True)
-    col5.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.0f}", estado_caja, clase_caja), unsafe_allow_html=True)
-    st.progress(min(int(round(avance_general)), 100), text=f"Avance físico general del proyecto: {avance_general:.0f}%")
+    # ---------------------------------------------------------------
+    # VISTA 2: COMPARATIVO POR DESGLOSE PRINCIPAL
+    # ---------------------------------------------------------------
+    if ES_ADMIN:
+        _titulo_seccion("Control financiero", "Presupuesto vs. gasto real")
 
-if saldo_caja < 0 and ES_ADMIN:
-    st.warning("⚠️ El gasto ejecutado supera lo cobrado al cliente. Considera solicitar la siguiente estimación.")
-
-st.markdown("---")
-
-# ---------------------------------------------------------------
-# VISTA 2: COMPARATIVO POR DESGLOSE PRINCIPAL
-# ---------------------------------------------------------------
-if ES_ADMIN:
-    _titulo_seccion("Control financiero", "Presupuesto vs. gasto real")
-
-tabla_comparativa = pd.DataFrame({
-    "Desglose": ["Materiales (Suministros)", "Mano de Obra", "Gastos Indirectos", "TOTAL"],
-    "Presupuesto Base": [p_materiales, p_mano_obra, p_indirectos, total_presupuestado],
-    "Gasto Real Realizado": [real_materiales, real_mano_obra, real_indirectos, total_real],
-})
-tabla_comparativa["Diferencia / Desviación"] = (
-    tabla_comparativa["Gasto Real Realizado"] - tabla_comparativa["Presupuesto Base"]
-)
-tabla_comparativa["% Ejercido"] = (
-    tabla_comparativa["Gasto Real Realizado"] / tabla_comparativa["Presupuesto Base"] * 100
-).fillna(0)
+    tabla_comparativa = construir_tabla_comparativa()
 
 
-def _color_desviacion(v):
-    return "color: #d62728; font-weight: bold" if v > 0 else "color: #2ca02c"
+    def _color_desviacion(v):
+        return "color: #d62728; font-weight: bold" if v > 0 else "color: #2ca02c"
 
 
-if ES_ADMIN:
-    st.dataframe(
-        tabla_comparativa.style
-        .format({
-            "Presupuesto Base": "${:,.2f}",
-            "Gasto Real Realizado": "${:,.2f}",
-            "Diferencia / Desviación": "${:,.2f}",
-            "% Ejercido": "{:.1f}%",
-        })
-        .map(_color_desviacion, subset=["Diferencia / Desviación"]),
-        **FULL_WIDTH,
-    )
+    if ES_ADMIN:
+        st.dataframe(
+            tabla_comparativa.style
+            .format({
+                "Presupuesto Base": "${:,.2f}",
+                "Gasto Real Realizado": "${:,.2f}",
+                "Diferencia / Desviación": "${:,.2f}",
+                "% Ejercido": "{:.1f}%",
+            })
+            .map(_color_desviacion, subset=["Diferencia / Desviación"]),
+            **FULL_WIDTH,
+        )
 
-st.markdown("---")
+    st.markdown("---")
 
-# ---------------------------------------------------------------
-# VISTA 3: CONTROL POR FASES (FINANCIERO + FÍSICO)
-# ---------------------------------------------------------------
-if ES_ADMIN:
-    _titulo_seccion("Avance", "Control físico y financiero por fases")
-
-resumen_fases = []
-for _, row in df_presupuesto.iterrows():
-    fase_name = row["Fase"]
-    en_fase = df_gastos["fase"] == fase_name
-    r_mat = df_gastos.loc[en_fase & (df_gastos["tipo"] == "Materiales"), "monto"].sum()
-    r_mo = df_gastos.loc[en_fase & (df_gastos["tipo"] == "Mano de Obra"), "monto"].sum()
-    r_ind = df_gastos.loc[en_fase & (df_gastos["tipo"] == FASE_INDIRECTOS), "monto"].sum()
-    total_fase_real = r_mat + r_mo
-    presup_fase = row["Subtotal Costo Directo"]
-
-    resumen_fases.append({
-        "Fase de Obra": fase_name,
-        "Semanas Est.": row["Semanas"],
-        "Presup. Materiales": row["Materiales"],
-        "Real Materiales": r_mat,
-        "Presup. Mano Obra": row["Mano de Obra"],
-        "Real Mano Obra": r_mo,
-        "Indirectos Fase": r_ind,
-        "Total Presupuestado": presup_fase,
-        "Total Real Fase": total_fase_real,
-        "% Avance Financiero": (total_fase_real / presup_fase * 100) if presup_fase else 0,
-        "% Avance Físico": avance_fisico.get(fase_name, 0),
-    })
-
-df_resumen_fases = pd.DataFrame(resumen_fases)
-df_resumen_fases["Estado"] = df_resumen_fases.apply(
-    lambda r: _estado_desviacion(r["% Avance Financiero"] - r["% Avance Físico"])[0], axis=1
-)
-
-if ES_ADMIN:
-    st.dataframe(
-        df_resumen_fases.style.format({
-            "Presup. Materiales": "${:,.2f}",
-            "Real Materiales": "${:,.2f}",
-            "Presup. Mano Obra": "${:,.2f}",
-            "Real Mano Obra": "${:,.2f}",
-            "Indirectos Fase": "${:,.2f}",
-            "Total Presupuestado": "${:,.2f}",
-            "Total Real Fase": "${:,.2f}",
-            "% Avance Financiero": "{:.1f}%",
-            "% Avance Físico": "{:.0f}%",
-        }),
-        **FULL_WIDTH,
-    )
-    st.caption("Estado compara la separación entre avance financiero y físico: hasta 7 puntos = En control; 8-15 = Atención; más de 15 = Revisar. "
-               "'Indirectos Fase' es informativo: el % financiero se calcula contra el costo directo presupuestado.")
-
-df_chart = pd.DataFrame({
-    "Fase": [f.split(":")[0] for f in df_resumen_fases["Fase de Obra"]],
-    "Presupuesto": df_resumen_fases["Total Presupuestado"].values,
-    "Real": df_resumen_fases["Total Real Fase"].values,
-}).set_index("Fase")
-if ES_ADMIN:
-    st.bar_chart(df_chart, **FULL_WIDTH)
-
-st.markdown("---")
-
-# ---------------------------------------------------------------
-# VISTA 4: BITÁCORAS (GASTOS Y PAGOS)
-# ---------------------------------------------------------------
-_titulo_seccion("Bitácora", "Movimientos del proyecto" if ES_ADMIN else "Gastos y pagos de tu obra")
-
-tab_gastos, tab_pagos = st.tabs(["Gastos y destajos", "Pagos del cliente"])
-
-with tab_gastos:
-    if df_gastos.empty:
-        st.info("Aún no se han registrado gastos.")
+if PAGINA == "Avance de Obra":
+    # ---------------------------------------------------------------
+    # VISTA 3: CONTROL POR FASES (FINANCIERO + FÍSICO)
+    # ---------------------------------------------------------------
+    if ES_ADMIN:
+        _titulo_seccion("Avance", "Control físico y financiero por fases")
     else:
-        df_vista = df_gastos.copy()
-        df_vista["comprobante"] = df_vista["comprobante"].apply(_miniatura_comprobante)
-        df_vista["fecha"] = df_vista["fecha"].map(_f_fecha)
+        _titulo_seccion("Avance", "Así avanza cada etapa de tu obra")
+        st.progress(min(int(round(avance_general)), 100),
+                    text=f"Avance físico general: {avance_general:.0f}%")
+        for fase_cli_av in FASES:
+            p_cli = float(avance_fisico.get(fase_cli_av, 0))
+            nombre_c = fase_cli_av.split(": ", 1)[1] if ": " in fase_cli_av else fase_cli_av
+            st.progress(min(int(round(p_cli)), 100), text=f"{nombre_c} — {p_cli:.0f}%")
 
-        if ES_ADMIN:
-            if st.session_state.pop("msg_gastos", None):
-                st.success("Cambios guardados en la bitácora de gastos.")
+    df_resumen_fases = construir_resumen_fases()
 
-            df_edicion = df_gastos.copy()
-            df_edicion["fecha"] = pd.to_datetime(df_edicion["fecha"]).dt.date
-            df_edicion["proveedor"] = df_edicion["proveedor"].fillna("")
-            df_edicion["comprobante"] = df_edicion["comprobante"].apply(_miniatura_comprobante)
-            df_edicion.insert(0, "Eliminar", False)
+    if ES_ADMIN:
+        st.dataframe(
+            df_resumen_fases.style.format({
+                "Presup. Materiales": "${:,.2f}",
+                "Real Materiales": "${:,.2f}",
+                "Presup. Mano Obra": "${:,.2f}",
+                "Real Mano Obra": "${:,.2f}",
+                "Indirectos Fase": "${:,.2f}",
+                "Total Presupuestado": "${:,.2f}",
+                "Total Real Fase": "${:,.2f}",
+                "% Avance Financiero": "{:.1f}%",
+                "% Avance Físico": "{:.0f}%",
+            }),
+            **FULL_WIDTH,
+        )
+        st.caption("Estado compara la separación entre avance financiero y físico: hasta 7 puntos = En control; 8-15 = Atención; más de 15 = Revisar. "
+                   "'Indirectos Fase' es informativo: el % financiero se calcula contra el costo directo presupuestado.")
 
-            editado = st.data_editor(
-                df_edicion,
-                column_config={
-                    "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca los registros a borrar"),
-                    "id": st.column_config.NumberColumn("Folio", disabled=True),
-                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="DD-MM-YYYY"),
-                    "fase": st.column_config.SelectboxColumn("Fase", options=FASES + [FASE_INDIRECTOS], required=True),
-                    "tipo": st.column_config.SelectboxColumn("Tipo", options=TIPOS_DIRECTOS + [FASE_INDIRECTOS], required=True),
-                    "monto": st.column_config.NumberColumn("Monto", format="dollar", min_value=0.01, required=True),
-                    "proveedor": st.column_config.TextColumn("Proveedor"),
-                    "descripcion": st.column_config.TextColumn("Descripción", required=True),
-                    "comprobante": st.column_config.ImageColumn(
-                        "Comprobante", help="Da clic en la imagen para ampliarla"),
-                },
-                disabled=["id", "comprobante"],
-                num_rows="fixed",
-                hide_index=True,
-                key="editor_gastos",
-                **FULL_WIDTH,
-            )
-            st.caption("✏️ Haz doble clic en cualquier celda para corregirla y luego pulsa «Guardar cambios». Los gastos nuevos se capturan en el panel lateral.")
+    df_chart = pd.DataFrame({
+        "Fase": [f.split(":")[0] for f in df_resumen_fases["Fase de Obra"]],
+        "Presupuesto": df_resumen_fases["Total Presupuestado"].values,
+        "Real": df_resumen_fases["Total Real Fase"].values,
+    }).set_index("Fase")
+    if ES_ADMIN:
+        st.bar_chart(df_chart, **FULL_WIDTH)
 
-            col_a, col_b, col_c = st.columns([1, 1, 2])
-            with col_a:
-                if st.button("💾 Guardar cambios", key="save_gastos"):
-                    errores, cambios = [], []
-                    originales = df_gastos.set_index("id")
-                    for _, r in editado.iterrows():
-                        gid = int(r["id"])
-                        fase_n, tipo_n = r["fase"], r["tipo"]
-                        desc_n = str(r["descripcion"] or "").strip()
-                        prov_n = str(r["proveedor"] or "").strip()
-                        monto_n = float(r["monto"] or 0)
-                        if fase_n == FASE_INDIRECTOS and tipo_n != FASE_INDIRECTOS:
-                            errores.append(f"Folio {gid}: si la fase es '{FASE_INDIRECTOS}', el tipo debe ser '{FASE_INDIRECTOS}'.")
-                            continue
-                        if monto_n <= 0:
-                            errores.append(f"Folio {gid}: el monto debe ser mayor a 0.")
-                            continue
-                        if not desc_n:
-                            errores.append(f"Folio {gid}: la descripción no puede quedar vacía.")
-                            continue
-                        o = originales.loc[gid]
-                        nuevo = (r["fecha"].isoformat(), fase_n, tipo_n, monto_n, prov_n, desc_n)
-                        original = (str(o["fecha"]), o["fase"], o["tipo"], float(o["monto"]), str(o["proveedor"] or "").strip(), str(o["descripcion"]))
-                        if nuevo != original:
-                            cambios.append((*nuevo, gid))
-                    if errores:
-                        st.error("No se guardó nada. Corrige lo siguiente:\n\n- " + "\n- ".join(errores))
-                    elif cambios:
-                        actualizar_gastos(cambios)
-                        st.session_state["msg_gastos"] = True
-                        st.rerun()
-                    else:
-                        st.info("No hay cambios que guardar.")
-            with col_b:
-                if st.button("🗑️ Eliminar seleccionados", key="del_gastos"):
-                    ids = editado.loc[editado["Eliminar"], "id"].tolist()
-                    if ids:
-                        eliminar_gastos(ids)
-                        st.rerun()
-                    else:
-                        st.warning("No hay registros marcados.")
-            with col_c:
-                st.download_button(
-                    "⬇️ Exportar bitácora a CSV",
-                    df_gastos.drop(columns=["comprobante"]).to_csv(index=False).encode("utf-8-sig"),
-                    file_name=f"bitacora_gastos_JE132_{datetime.now():%Y%m%d}.csv",
-                    mime="text/csv",
+    st.markdown("---")
+
+if PAGINA == "Bitácora":
+    # ---------------------------------------------------------------
+    # VISTA 4: BITÁCORAS (GASTOS Y PAGOS)
+    # ---------------------------------------------------------------
+    _titulo_seccion("Bitácora", "Movimientos del proyecto" if ES_ADMIN else "Gastos y pagos de tu obra")
+
+    tab_gastos, tab_pagos = st.tabs(["Gastos y destajos", "Pagos del cliente"])
+
+    with tab_gastos:
+        if df_gastos.empty:
+            st.info("Aún no se han registrado gastos.")
+        else:
+            df_vista = df_gastos.copy()
+            df_vista["comprobante"] = df_vista["comprobante"].apply(_miniatura_comprobante)
+            df_vista["fecha"] = df_vista["fecha"].map(_f_fecha)
+
+            if ES_ADMIN:
+                if st.session_state.pop("msg_gastos", None):
+                    st.success("Cambios guardados en la bitácora de gastos.")
+
+                df_edicion = df_gastos.copy()
+                df_edicion["fecha"] = pd.to_datetime(df_edicion["fecha"]).dt.date
+                df_edicion["proveedor"] = df_edicion["proveedor"].fillna("")
+                df_edicion["comprobante"] = df_edicion["comprobante"].apply(_miniatura_comprobante)
+                df_edicion.insert(0, "Eliminar", False)
+
+                editado = st.data_editor(
+                    df_edicion,
+                    column_config={
+                        "Eliminar": st.column_config.CheckboxColumn("Eliminar", help="Marca los registros a borrar"),
+                        "id": st.column_config.NumberColumn("Folio", disabled=True),
+                        "fecha": st.column_config.DateColumn("Fecha", required=True, format="DD-MM-YYYY"),
+                        "fase": st.column_config.SelectboxColumn("Fase", options=FASES + [FASE_INDIRECTOS], required=True),
+                        "tipo": st.column_config.SelectboxColumn("Tipo", options=TIPOS_DIRECTOS + [FASE_INDIRECTOS], required=True),
+                        "monto": st.column_config.NumberColumn("Monto", format="dollar", min_value=0.01, required=True),
+                        "proveedor": st.column_config.TextColumn("Proveedor"),
+                        "descripcion": st.column_config.TextColumn("Descripción", required=True),
+                        "comprobante": st.column_config.ImageColumn(
+                            "Comprobante", help="Da clic en la imagen para ampliarla"),
+                    },
+                    disabled=["id", "comprobante"],
+                    num_rows="fixed",
+                    hide_index=True,
+                    key="editor_gastos",
+                    **FULL_WIDTH,
                 )
+                st.caption("✏️ Haz doble clic en cualquier celda para corregirla y luego pulsa «Guardar cambios». Los gastos nuevos se capturan en el panel lateral.")
 
-            # --- Adjuntar, reemplazar o quitar comprobante de un gasto existente ---
-            with st.expander("📎 Adjuntar o reemplazar comprobante de un gasto"):
-                if st.session_state.pop("msg_comp_ok", None):
-                    st.success("Comprobante guardado.")
-                if st.session_state.pop("msg_comp_quitado", None):
-                    st.success("Comprobante eliminado del gasto.")
-                opciones_g = {
-                    f"Folio {r['id']} | {_f_fecha(r['fecha'])} | ${r['monto']:,.2f} | {str(r['descripcion'])[:40]}"
-                    + (" 📎" if r["comprobante"] else ""): int(r["id"])
-                    for _, r in df_gastos.iterrows()
-                }
-                sel_g_comp = st.selectbox("Gasto:", list(opciones_g.keys()), key="sel_gasto_comp")
-                gid_comp = opciones_g[sel_g_comp]
-                comp_actual = df_gastos.set_index("id").loc[gid_comp, "comprobante"]
-                if comp_actual:
-                    st.caption(f"Este gasto ya tiene comprobante ({comp_actual}); al subir uno nuevo se reemplaza.")
-
-                archivo_nuevo = st.file_uploader(
-                    "Foto de nota, factura o PDF:",
-                    type=["jpg", "jpeg", "png", "webp", "pdf"],
-                    key=f"up_comp_{gid_comp}",
-                )
-                cc_a, cc_b = st.columns([1, 2])
-                with cc_a:
-                    if st.button("💾 Guardar comprobante", key=f"btn_comp_{gid_comp}",
-                                 disabled=archivo_nuevo is None):
-                        if comp_actual:  # limpiar el archivo anterior (podría tener otra extensión)
-                            (COMPROBANTES_DIR / str(comp_actual)).unlink(missing_ok=True)
-                        guardar_comprobante(gid_comp, archivo_nuevo)
-                        st.session_state["msg_comp_ok"] = True
-                        st.rerun()
-                with cc_b:
-                    if comp_actual:
-                        conf_quitar = st.checkbox("Confirmo quitar el comprobante de este gasto",
-                                                  key=f"conf_quitar_{gid_comp}")
-                        if st.button("🗑️ Quitar comprobante", disabled=not conf_quitar,
-                                     key=f"btn_quitar_comp_{gid_comp}"):
-                            (COMPROBANTES_DIR / str(comp_actual)).unlink(missing_ok=True)
-                            with get_conn() as conn:
-                                conn.execute("UPDATE gastos SET comprobante = NULL WHERE id = ?", (gid_comp,))
-                            st.session_state["msg_comp_quitado"] = True
+                col_a, col_b, col_c = st.columns([1, 1, 2])
+                with col_a:
+                    if st.button("💾 Guardar cambios", key="save_gastos"):
+                        errores, cambios = [], []
+                        originales = df_gastos.set_index("id")
+                        for _, r in editado.iterrows():
+                            gid = int(r["id"])
+                            fase_n, tipo_n = r["fase"], r["tipo"]
+                            desc_n = str(r["descripcion"] or "").strip()
+                            prov_n = str(r["proveedor"] or "").strip()
+                            monto_n = float(r["monto"] or 0)
+                            if fase_n == FASE_INDIRECTOS and tipo_n != FASE_INDIRECTOS:
+                                errores.append(f"Folio {gid}: si la fase es '{FASE_INDIRECTOS}', el tipo debe ser '{FASE_INDIRECTOS}'.")
+                                continue
+                            if monto_n <= 0:
+                                errores.append(f"Folio {gid}: el monto debe ser mayor a 0.")
+                                continue
+                            if not desc_n:
+                                errores.append(f"Folio {gid}: la descripción no puede quedar vacía.")
+                                continue
+                            o = originales.loc[gid]
+                            nuevo = (r["fecha"].isoformat(), fase_n, tipo_n, monto_n, prov_n, desc_n)
+                            original = (str(o["fecha"]), o["fase"], o["tipo"], float(o["monto"]), str(o["proveedor"] or "").strip(), str(o["descripcion"]))
+                            if nuevo != original:
+                                cambios.append((*nuevo, gid))
+                        if errores:
+                            st.error("No se guardó nada. Corrige lo siguiente:\n\n- " + "\n- ".join(errores))
+                        elif cambios:
+                            actualizar_gastos(cambios)
+                            st.session_state["msg_gastos"] = True
                             st.rerun()
-        else:
-            st.dataframe(
-                df_vista.rename(columns={"id": "Folio", "monto": "Monto", "comprobante": "Comprobante"})
-                .style.format({"Monto": "${:,.2f}"}),
-                column_config={"Comprobante": st.column_config.ImageColumn(
-                    "Comprobante", help="Da clic en la imagen para ampliarla")},
-                hide_index=True,
-                **FULL_WIDTH,
-            )
-
-        # --- Visor de comprobantes (ambos roles) ---
-        con_comprobante = df_gastos[df_gastos["comprobante"].notna() & (df_gastos["comprobante"] != "")]
-        if not con_comprobante.empty:
-            with st.expander("🔍 Ver comprobante de un gasto"):
-                opciones = {
-                    f"Folio {r['id']} | {_f_fecha(r['fecha'])} | ${r['monto']:,.2f} | {r['descripcion'][:40]}": r
-                    for _, r in con_comprobante.iterrows()
-                }
-                seleccion = st.selectbox("Selecciona el gasto:", list(opciones.keys()))
-                registro = opciones[seleccion]
-                ruta = COMPROBANTES_DIR / registro["comprobante"]
-                if not ruta.exists():
-                    st.error("El archivo del comprobante no se encontró en el almacenamiento.")
-                elif ruta.suffix.lower() in EXTENSIONES_IMAGEN:
-                    try:
-                        st.image(str(ruta), caption=f"Comprobante del folio {registro['id']}", **FULL_WIDTH)
-                    except Exception:
-                        st.warning("La imagen no se pudo previsualizar; puedes descargarla directamente.")
+                        else:
+                            st.info("No hay cambios que guardar.")
+                with col_b:
+                    if st.button("🗑️ Eliminar seleccionados", key="del_gastos"):
+                        ids = editado.loc[editado["Eliminar"], "id"].tolist()
+                        if ids:
+                            eliminar_gastos(ids)
+                            st.rerun()
+                        else:
+                            st.warning("No hay registros marcados.")
+                with col_c:
                     st.download_button(
-                        "⬇️ Descargar imagen", ruta.read_bytes(),
-                        file_name=ruta.name, key=f"dl_{registro['id']}",
+                        "⬇️ Exportar bitácora a CSV",
+                        df_gastos.drop(columns=["comprobante"]).to_csv(index=False).encode("utf-8-sig"),
+                        file_name=f"bitacora_gastos_JE132_{datetime.now():%Y%m%d}.csv",
+                        mime="text/csv",
                     )
-                else:
-                    if hasattr(st, "pdf"):
+
+                # --- Adjuntar, reemplazar o quitar comprobante de un gasto existente ---
+                with st.expander("📎 Adjuntar o reemplazar comprobante de un gasto"):
+                    if st.session_state.pop("msg_comp_ok", None):
+                        st.success("Comprobante guardado.")
+                    if st.session_state.pop("msg_comp_quitado", None):
+                        st.success("Comprobante eliminado del gasto.")
+                    opciones_g = {
+                        f"Folio {r['id']} | {_f_fecha(r['fecha'])} | ${r['monto']:,.2f} | {str(r['descripcion'])[:40]}"
+                        + (" 📎" if r["comprobante"] else ""): int(r["id"])
+                        for _, r in df_gastos.iterrows()
+                    }
+                    sel_g_comp = st.selectbox("Gasto:", list(opciones_g.keys()), key="sel_gasto_comp")
+                    gid_comp = opciones_g[sel_g_comp]
+                    comp_actual = df_gastos.set_index("id").loc[gid_comp, "comprobante"]
+                    if comp_actual:
+                        st.caption(f"Este gasto ya tiene comprobante ({comp_actual}); al subir uno nuevo se reemplaza.")
+
+                    archivo_nuevo = st.file_uploader(
+                        "Foto de nota, factura o PDF:",
+                        type=["jpg", "jpeg", "png", "webp", "pdf"],
+                        key=f"up_comp_{gid_comp}",
+                    )
+                    cc_a, cc_b = st.columns([1, 2])
+                    with cc_a:
+                        if st.button("💾 Guardar comprobante", key=f"btn_comp_{gid_comp}",
+                                     disabled=archivo_nuevo is None):
+                            if comp_actual:  # limpiar el archivo anterior (podría tener otra extensión)
+                                (COMPROBANTES_DIR / str(comp_actual)).unlink(missing_ok=True)
+                            guardar_comprobante(gid_comp, archivo_nuevo)
+                            st.session_state["msg_comp_ok"] = True
+                            st.rerun()
+                    with cc_b:
+                        if comp_actual:
+                            conf_quitar = st.checkbox("Confirmo quitar el comprobante de este gasto",
+                                                      key=f"conf_quitar_{gid_comp}")
+                            if st.button("🗑️ Quitar comprobante", disabled=not conf_quitar,
+                                         key=f"btn_quitar_comp_{gid_comp}"):
+                                (COMPROBANTES_DIR / str(comp_actual)).unlink(missing_ok=True)
+                                with get_conn() as conn:
+                                    conn.execute("UPDATE gastos SET comprobante = NULL WHERE id = ?", (gid_comp,))
+                                st.session_state["msg_comp_quitado"] = True
+                                st.rerun()
+            else:
+                st.dataframe(
+                    df_vista.rename(columns={"id": "Folio", "monto": "Monto", "comprobante": "Comprobante"})
+                    .style.format({"Monto": "${:,.2f}"}),
+                    column_config={"Comprobante": st.column_config.ImageColumn(
+                        "Comprobante", help="Da clic en la imagen para ampliarla")},
+                    hide_index=True,
+                    **FULL_WIDTH,
+                )
+
+            # --- Visor de comprobantes (ambos roles) ---
+            con_comprobante = df_gastos[df_gastos["comprobante"].notna() & (df_gastos["comprobante"] != "")]
+            if not con_comprobante.empty:
+                with st.expander("🔍 Ver comprobante de un gasto"):
+                    opciones = {
+                        f"Folio {r['id']} | {_f_fecha(r['fecha'])} | ${r['monto']:,.2f} | {r['descripcion'][:40]}": r
+                        for _, r in con_comprobante.iterrows()
+                    }
+                    seleccion = st.selectbox("Selecciona el gasto:", list(opciones.keys()))
+                    registro = opciones[seleccion]
+                    ruta = COMPROBANTES_DIR / registro["comprobante"]
+                    if not ruta.exists():
+                        st.error("El archivo del comprobante no se encontró en el almacenamiento.")
+                    elif ruta.suffix.lower() in EXTENSIONES_IMAGEN:
                         try:
-                            st.pdf(ruta.read_bytes(), height=650, key=f"pdf_{registro['id']}")
+                            st.image(str(ruta), caption=f"Comprobante del folio {registro['id']}", **FULL_WIDTH)
                         except Exception:
-                            st.warning("El PDF no se pudo previsualizar; puedes descargarlo directamente.")
+                            st.warning("La imagen no se pudo previsualizar; puedes descargarla directamente.")
+                        st.download_button(
+                            "⬇️ Descargar imagen", ruta.read_bytes(),
+                            file_name=ruta.name, key=f"dl_{registro['id']}",
+                        )
                     else:
-                        st.info("Tu versión de Streamlit no incluye el visor de PDF; descárgalo para verlo.")
-                    st.download_button(
-                        "⬇️ Descargar comprobante PDF", ruta.read_bytes(),
-                        file_name=ruta.name, mime="application/pdf", key=f"dl_{registro['id']}",
-                    )
+                        if hasattr(st, "pdf"):
+                            try:
+                                st.pdf(ruta.read_bytes(), height=650, key=f"pdf_{registro['id']}")
+                            except Exception:
+                                st.warning("El PDF no se pudo previsualizar; puedes descargarlo directamente.")
+                        else:
+                            st.info("Tu versión de Streamlit no incluye el visor de PDF; descárgalo para verlo.")
+                        st.download_button(
+                            "⬇️ Descargar comprobante PDF", ruta.read_bytes(),
+                            file_name=ruta.name, mime="application/pdf", key=f"dl_{registro['id']}",
+                        )
 
-with tab_pagos:
-    if df_pagos.empty:
-        st.info("Aún no hay pagos del cliente registrados.")
-    else:
-        if ES_ADMIN:
-            if st.session_state.pop("msg_pagos", None):
-                st.success("Cambios guardados en los pagos del cliente.")
-
-            df_editor_p = df_pagos.copy()
-            df_editor_p["fecha"] = pd.to_datetime(df_editor_p["fecha"]).dt.date
-            df_editor_p.insert(0, "Eliminar", False)
-            editado_p = st.data_editor(
-                df_editor_p,
-                column_config={
-                    "Eliminar": st.column_config.CheckboxColumn("Eliminar"),
-                    "id": st.column_config.NumberColumn("Folio", disabled=True),
-                    "fecha": st.column_config.DateColumn("Fecha", required=True, format="DD-MM-YYYY"),
-                    "concepto": st.column_config.TextColumn("Concepto", required=True),
-                    "monto": st.column_config.NumberColumn("Monto", format="dollar", min_value=0.01, required=True),
-                },
-                disabled=["id"],
-                num_rows="fixed",
-                hide_index=True,
-                key="editor_pagos",
-                **FULL_WIDTH,
-            )
-            st.caption("✏️ Doble clic en una celda para corregirla y luego «Guardar cambios».")
-
-            col_p1, col_p2 = st.columns([1, 3])
-            with col_p1:
-                if st.button("💾 Guardar cambios", key="save_pagos"):
-                    errores_p, cambios_p = [], []
-                    originales_p = df_pagos.set_index("id")
-                    for _, r in editado_p.iterrows():
-                        pid = int(r["id"])
-                        concepto_n = str(r["concepto"] or "").strip()
-                        monto_n = float(r["monto"] or 0)
-                        if monto_n <= 0:
-                            errores_p.append(f"Folio {pid}: el monto debe ser mayor a 0.")
-                            continue
-                        if not concepto_n:
-                            errores_p.append(f"Folio {pid}: el concepto no puede quedar vacío.")
-                            continue
-                        o = originales_p.loc[pid]
-                        nuevo = (r["fecha"].isoformat(), concepto_n, monto_n)
-                        original = (str(o["fecha"]), str(o["concepto"]), float(o["monto"]))
-                        if nuevo != original:
-                            cambios_p.append((*nuevo, pid))
-                    if errores_p:
-                        st.error("No se guardó nada. Corrige lo siguiente:\n\n- " + "\n- ".join(errores_p))
-                    elif cambios_p:
-                        actualizar_pagos(cambios_p)
-                        st.session_state["msg_pagos"] = True
-                        st.rerun()
-                    else:
-                        st.info("No hay cambios que guardar.")
-            with col_p2:
-                if st.button("🗑️ Eliminar seleccionados", key="del_pagos"):
-                    ids = editado_p.loc[editado_p["Eliminar"], "id"].tolist()
-                    if ids:
-                        eliminar_pagos(ids)
-                        st.rerun()
-                    else:
-                        st.warning("No hay registros marcados.")
+    with tab_pagos:
+        if df_pagos.empty:
+            st.info("Aún no hay pagos del cliente registrados.")
         else:
-            st.dataframe(
-                df_pagos.assign(fecha=df_pagos["fecha"].map(_f_fecha))
-                .rename(columns={"id": "Folio", "monto": "Monto"})
-                .style.format({"Monto": "${:,.2f}"}),
-                hide_index=True,
-                **FULL_WIDTH,
-            )
+            if ES_ADMIN:
+                if st.session_state.pop("msg_pagos", None):
+                    st.success("Cambios guardados en los pagos del cliente.")
 
-# ---------------------------------------------------------------
-# VISTA 5: GENERACIÓN DE INFORMES (PDF Y EXCEL)
-# ---------------------------------------------------------------
-st.markdown("---")
-st.subheader("📄 Informes del Proyecto")
+                df_editor_p = df_pagos.copy()
+                df_editor_p["fecha"] = pd.to_datetime(df_editor_p["fecha"]).dt.date
+                df_editor_p.insert(0, "Eliminar", False)
+                editado_p = st.data_editor(
+                    df_editor_p,
+                    column_config={
+                        "Eliminar": st.column_config.CheckboxColumn("Eliminar"),
+                        "id": st.column_config.NumberColumn("Folio", disabled=True),
+                        "fecha": st.column_config.DateColumn("Fecha", required=True, format="DD-MM-YYYY"),
+                        "concepto": st.column_config.TextColumn("Concepto", required=True),
+                        "monto": st.column_config.NumberColumn("Monto", format="dollar", min_value=0.01, required=True),
+                    },
+                    disabled=["id"],
+                    num_rows="fixed",
+                    hide_index=True,
+                    key="editor_pagos",
+                    **FULL_WIDTH,
+                )
+                st.caption("✏️ Doble clic en una celda para corregirla y luego «Guardar cambios».")
 
+                col_p1, col_p2 = st.columns([1, 3])
+                with col_p1:
+                    if st.button("💾 Guardar cambios", key="save_pagos"):
+                        errores_p, cambios_p = [], []
+                        originales_p = df_pagos.set_index("id")
+                        for _, r in editado_p.iterrows():
+                            pid = int(r["id"])
+                            concepto_n = str(r["concepto"] or "").strip()
+                            monto_n = float(r["monto"] or 0)
+                            if monto_n <= 0:
+                                errores_p.append(f"Folio {pid}: el monto debe ser mayor a 0.")
+                                continue
+                            if not concepto_n:
+                                errores_p.append(f"Folio {pid}: el concepto no puede quedar vacío.")
+                                continue
+                            o = originales_p.loc[pid]
+                            nuevo = (r["fecha"].isoformat(), concepto_n, monto_n)
+                            original = (str(o["fecha"]), str(o["concepto"]), float(o["monto"]))
+                            if nuevo != original:
+                                cambios_p.append((*nuevo, pid))
+                        if errores_p:
+                            st.error("No se guardó nada. Corrige lo siguiente:\n\n- " + "\n- ".join(errores_p))
+                        elif cambios_p:
+                            actualizar_pagos(cambios_p)
+                            st.session_state["msg_pagos"] = True
+                            st.rerun()
+                        else:
+                            st.info("No hay cambios que guardar.")
+                with col_p2:
+                    if st.button("🗑️ Eliminar seleccionados", key="del_pagos"):
+                        ids = editado_p.loc[editado_p["Eliminar"], "id"].tolist()
+                        if ids:
+                            eliminar_pagos(ids)
+                            st.rerun()
+                        else:
+                            st.warning("No hay registros marcados.")
+            else:
+                st.dataframe(
+                    df_pagos.assign(fecha=df_pagos["fecha"].map(_f_fecha))
+                    .rename(columns={"id": "Folio", "monto": "Monto"})
+                    .style.format({"Monto": "${:,.2f}"}),
+                    hide_index=True,
+                    **FULL_WIDTH,
+                )
 
-def _dinero(v: float) -> str:
-    return f"${v:,.2f}"
-
-
-def generar_informe_pdf() -> bytes:
-    """Informe ejecutivo en PDF: resumen, desglose, fases y bitácoras."""
-    from io import BytesIO
-
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import cm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-    buf = BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=letter,
-        topMargin=3.6 * cm, bottomMargin=2.2 * cm, leftMargin=1.5 * cm, rightMargin=1.5 * cm,
-        title="Informe de Control de Obra JE132",
-    )
-    styles = getSampleStyleSheet()
-    titulo = ParagraphStyle("titulo", parent=styles["Title"], fontSize=16, spaceAfter=2)
-    sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, textColor=colors.grey)
-    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=12, spaceBefore=14, spaceAfter=6)
-    chico = ParagraphStyle("chico", parent=styles["Normal"], fontSize=8)
-
-    estilo_tabla = TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f5f9")]),
-        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ])
-
-    elementos = [
-        Paragraph("Informe de Control de Ejecución de Obra", titulo),
-        Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", styles["Normal"]),
-        Paragraph("Cliente: José Manuel Robles Miguel | Contratistas: DACAM & HOGAR 911", sub),
-        Paragraph(f"Fecha de emisión: {datetime.now():%d/%m/%Y %H:%M}", sub),
-        Spacer(1, 10),
-    ]
-
-    # --- Resumen financiero ---
-    elementos.append(Paragraph("1. Resumen Financiero", h2))
-    t_resumen = Table([
-        ["Concepto", "Monto"],
-        ["Presupuesto Total Contratado", _dinero(total_presupuestado)],
-        ["Total Ejecutado (Real)", f"{_dinero(total_real)}  ({pct_ejercido:.1f}%)"],
-        ["Cobrado al Cliente", f"{_dinero(total_cobrado)}  ({pct_cobrado:.1f}%)"],
-        ["Saldo en Caja (Cobrado - Gastado)", _dinero(saldo_caja)],
-    ], colWidths=[10 * cm, 7 * cm])
-    t_resumen.setStyle(estilo_tabla)
-    elementos.append(t_resumen)
-
-    # --- Desglose ---
-    elementos.append(Paragraph("2. Desglose: Presupuesto vs. Real", h2))
-    filas_desglose = [["Desglose", "Presupuesto", "Real", "Desviación", "% Ejercido"]]
-    for _, r in tabla_comparativa.iterrows():
-        filas_desglose.append([
-            r["Desglose"], _dinero(r["Presupuesto Base"]), _dinero(r["Gasto Real Realizado"]),
-            _dinero(r["Diferencia / Desviación"]), f"{r['% Ejercido']:.1f}%",
-        ])
-    t_desglose = Table(filas_desglose, colWidths=[6 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm, 2 * cm])
-    t_desglose.setStyle(estilo_tabla)
-    elementos.append(t_desglose)
-
-    # --- Fases ---
-    elementos.append(Paragraph("3. Control por Fases", h2))
-    filas_fases = [["Fase", "Presupuesto", "Real", "% Financ.", "% Físico", "Estado"]]
-    for _, r in df_resumen_fases.iterrows():
-        estado = "ATENCIÓN" if r["Alerta"] == "🔴" else "OK"
-        filas_fases.append([
-            Paragraph(r["Fase de Obra"], chico), _dinero(r["Total Presupuestado"]),
-            _dinero(r["Total Real Fase"]), f"{r['% Avance Financiero']:.1f}%",
-            f"{r['% Avance Físico']:.0f}%", estado,
-        ])
-    t_fases = Table(filas_fases, colWidths=[6.5 * cm, 3 * cm, 3 * cm, 1.9 * cm, 1.7 * cm, 1.7 * cm])
-    t_fases.setStyle(estilo_tabla)
-    elementos.append(t_fases)
-    elementos.append(Paragraph(
-        "ATENCIÓN = el avance financiero supera al físico por más de 10 puntos "
-        "(posible sobrecosto o adelanto de compras).", chico))
-
-    # --- Bitácora de gastos ---
-    elementos.append(Paragraph("4. Bitácora de Gastos", h2))
-    if df_gastos.empty:
-        elementos.append(Paragraph("Sin gastos registrados.", styles["Normal"]))
-    else:
-        filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
-        for _, r in df_gastos.sort_values(["fecha", "id"]).iterrows():
-            filas_g.append([
-                str(r["id"]), _f_fecha(r["fecha"]), Paragraph(r["fase"].split(":")[0], chico),
-                Paragraph(r["tipo"], chico), _dinero(r["monto"]),
-                Paragraph(str(r["proveedor"] or ""), chico), Paragraph(str(r["descripcion"]), chico),
-            ])
-        t_g = Table(filas_g, colWidths=[1.2 * cm, 2 * cm, 1.9 * cm, 2.4 * cm, 2.4 * cm, 3.3 * cm, 4.6 * cm], repeatRows=1)
-        t_g.setStyle(estilo_tabla)
-        elementos.append(t_g)
-
-    # --- Pagos del cliente ---
-    elementos.append(Paragraph("5. Pagos del Cliente", h2))
-    if df_pagos.empty:
-        elementos.append(Paragraph("Sin pagos registrados.", styles["Normal"]))
-    else:
-        filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
-        for _, r in df_pagos.sort_values(["fecha", "id"]).iterrows():
-            filas_p.append([str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["concepto"]), chico), _dinero(r["monto"])])
-        filas_p.append(["", "", "TOTAL COBRADO", _dinero(total_cobrado)])
-        t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
-        t_p.setStyle(estilo_tabla)
-        elementos.append(t_p)
-
-    elementos.append(Spacer(1, 16))
-    elementos.append(Paragraph(
-        f"Documento generado automáticamente por el Sistema de Control de Obra "
-        f"(control.hogar911.com) el {datetime.now():%d/%m/%Y a las %H:%M}.", chico))
-
-    doc.build(elementos, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
-    return buf.getvalue()
+if PAGINA == "Informes":
+    # ---------------------------------------------------------------
+    # VISTA 5: GENERACIÓN DE INFORMES (PDF Y EXCEL)
+    # ---------------------------------------------------------------
+    st.subheader("📄 Informes del Proyecto")
+    tabla_comparativa = construir_tabla_comparativa()
+    df_resumen_fases = construir_resumen_fases()
 
 
-def generar_informe_excel() -> bytes:
-    """Informe en Excel con hojas: Resumen, Desglose, Fases, Gastos y Pagos."""
-    from io import BytesIO
-
-    buf = BytesIO()
-    df_resumen = pd.DataFrame({
-        "Concepto": [
-            "Presupuesto Total Contratado", "Total Ejecutado (Real)",
-            "Cobrado al Cliente", "Saldo en Caja (Cobrado - Gastado)",
-        ],
-        "Monto": [total_presupuestado, total_real, total_cobrado, saldo_caja],
-    })
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
-        tabla_comparativa.to_excel(writer, sheet_name="Desglose", index=False)
-        df_resumen_fases.drop(columns=["Alerta"]).to_excel(writer, sheet_name="Fases", index=False)
-        df_gastos.drop(columns=["comprobante"]).to_excel(writer, sheet_name="Gastos", index=False)
-        df_pagos.to_excel(writer, sheet_name="Pagos", index=False)
-    return buf.getvalue()
+    def _dinero(v: float) -> str:
+        return f"${v:,.2f}"
 
 
-col_pdf, col_xls = st.columns(2)
-fecha_archivo = f"{datetime.now():%Y%m%d}"
-with col_pdf:
-    try:
-        st.download_button(
-            "📄 Descargar Informe Ejecutivo (PDF)",
-            generar_informe_pdf(),
-            file_name=f"informe_obra_JE132_{fecha_archivo}.pdf",
-            mime="application/pdf",
-            **FULL_WIDTH,
+    def generar_informe_pdf() -> bytes:
+        """Informe ejecutivo en PDF: resumen, desglose, fases y bitácoras."""
+        from io import BytesIO
+
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+        buf = BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=letter,
+            topMargin=3.6 * cm, bottomMargin=2.2 * cm, leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+            title="Informe de Control de Obra JE132",
         )
-        st.caption("Ideal para enviar al cliente o imprimir: resumen, fases y bitácoras.")
-    except ImportError:
-        st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
-with col_xls:
-    try:
-        st.download_button(
-            "📊 Descargar Informe en Excel",
-            generar_informe_excel(),
-            file_name=f"informe_obra_JE132_{fecha_archivo}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            **FULL_WIDTH,
-        )
-        st.caption("Hojas separadas: Resumen, Desglose, Fases, Gastos y Pagos.")
-    except ImportError:
-        st.error("Falta la librería openpyxl. Agrega 'openpyxl' al requirements.txt.")
+        styles = getSampleStyleSheet()
+        titulo = ParagraphStyle("titulo", parent=styles["Title"], fontSize=16, spaceAfter=2)
+        sub = ParagraphStyle("sub", parent=styles["Normal"], fontSize=10, textColor=colors.grey)
+        h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=12, spaceBefore=14, spaceAfter=6)
+        chico = ParagraphStyle("chico", parent=styles["Normal"], fontSize=8)
 
+        estilo_tabla = TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f5f9")]),
+            ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ])
 
-# --- Informe por periodo (estado de cuenta con corte de fechas) ---
-def _corte_periodo(desde: str, hasta: str) -> dict:
-    """Corte financiero: acumulado anterior al periodo, movimientos del periodo y saldo final."""
-    g_antes = df_gastos[df_gastos["fecha"] < desde]
-    g_per = df_gastos[(df_gastos["fecha"] >= desde) & (df_gastos["fecha"] <= hasta)]
-    p_antes = df_pagos[df_pagos["fecha"] < desde]
-    p_per = df_pagos[(df_pagos["fecha"] >= desde) & (df_pagos["fecha"] <= hasta)]
+        elementos = [
+            Paragraph("Informe de Control de Ejecución de Obra", titulo),
+            Paragraph("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)", styles["Normal"]),
+            Paragraph("Cliente: José Manuel Robles Miguel | Contratistas: DACAM & HOGAR 911", sub),
+            Paragraph(f"Fecha de emisión: {datetime.now():%d/%m/%Y %H:%M}", sub),
+            Spacer(1, 10),
+        ]
 
-    cobrado_antes = float(p_antes["monto"].sum())
-    gastado_antes = float(g_antes["monto"].sum())
-    saldo_inicial = cobrado_antes - gastado_antes
-    cobrado_per = float(p_per["monto"].sum())
-    gastado_per = float(g_per["monto"].sum())
-    return {
-        "g_per": g_per, "p_per": p_per,
-        "cobrado_antes": cobrado_antes, "gastado_antes": gastado_antes,
-        "saldo_inicial": saldo_inicial,
-        "cobrado_per": cobrado_per, "gastado_per": gastado_per,
-        "saldo_final": saldo_inicial + cobrado_per - gastado_per,
-        "cobrado_cierre": cobrado_antes + cobrado_per,
-        "gastado_cierre": gastado_antes + gastado_per,
-    }
+        # --- Resumen financiero ---
+        elementos.append(Paragraph("1. Resumen Financiero", h2))
+        t_resumen = Table([
+            ["Concepto", "Monto"],
+            ["Presupuesto Total Contratado", _dinero(total_presupuestado)],
+            ["Total Ejecutado (Real)", f"{_dinero(total_real)}  ({pct_ejercido:.1f}%)"],
+            ["Cobrado al Cliente", f"{_dinero(total_cobrado)}  ({pct_cobrado:.1f}%)"],
+            ["Saldo en Caja (Cobrado - Gastado)", _dinero(saldo_caja)],
+        ], colWidths=[10 * cm, 7 * cm])
+        t_resumen.setStyle(estilo_tabla)
+        elementos.append(t_resumen)
 
-
-def generar_informe_periodo_pdf(desde: str, hasta: str) -> bytes:
-    """Informe por periodo: saldo al día anterior, movimientos del periodo y saldo al cierre."""
-    from io import BytesIO
-
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.units import cm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-    e = _pdf_estilos()
-    c = _corte_periodo(desde, hasta)
-    dia_antes = (pd.to_datetime(desde) - pd.Timedelta(days=1)).date().isoformat()
-
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
-                            leftMargin=1.5 * cm, rightMargin=1.5 * cm,
-                            title=f"Informe por Periodo {desde} a {hasta}")
-
-    encabezado = Table([
-        ["INFORME FINANCIERO POR PERIODO", f"Periodo: {_f_fecha(desde)} al {_f_fecha(hasta)}"],
-        ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", f"Emitido: {datetime.now():%Y-%m-%d}"],
-        ["Cliente: José Manuel Robles Miguel", ""],
-        ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
-    ], colWidths=[12.2 * cm, 6.4 * cm])
-    encabezado.setStyle(TableStyle([
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (0, 0), 13),
-        ("FONTSIZE", (1, 0), (1, 0), 10),
-        ("FONTSIZE", (0, 1), (-1, -1), 9),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-    ]))
-    elems = [encabezado, Spacer(1, 8)]
-
-    # 1. Estado de cuenta del periodo
-    elems.append(Paragraph("1. Estado de Cuenta del Periodo", e["h2"]))
-    t_edo = Table([
-        ["Concepto", "Monto"],
-        [f"Saldo en caja al {_f_fecha(dia_antes)} (cobrado {_dinero(c['cobrado_antes'])} − gastado {_dinero(c['gastado_antes'])})",
-         _dinero(c["saldo_inicial"])],
-        ["(+) Cobrado al cliente en el periodo", _dinero(c["cobrado_per"])],
-        ["(−) Gastos del periodo", _dinero(c["gastado_per"])],
-        [f"Saldo en caja al {_f_fecha(hasta)}", _dinero(c["saldo_final"])],
-    ], colWidths=[13 * cm, 4.5 * cm])
-    t_edo.setStyle(e["tabla"])
-    elems.append(t_edo)
-
-    # 2. Desglose del gasto del periodo
-    elems.append(Paragraph("2. Desglose del Gasto del Periodo", e["h2"]))
-    g_per = c["g_per"]
-    filas_tipo = [["Por tipo", "Monto"]]
-    for tipo in TIPOS_DIRECTOS + [FASE_INDIRECTOS]:
-        filas_tipo.append([tipo, _dinero(float(g_per.loc[g_per["tipo"] == tipo, "monto"].sum()))])
-    filas_tipo.append(["Total del periodo", _dinero(c["gastado_per"])])
-    t_tipo = Table(filas_tipo, colWidths=[9 * cm, 4.5 * cm])
-    t_tipo.setStyle(e["tabla"])
-    elems.append(t_tipo)
-
-    if not g_per.empty:
-        elems.append(Spacer(1, 6))
-        filas_fase = [["Por fase", "Monto"]]
-        for fase, monto in g_per.groupby("fase")["monto"].sum().sort_values(ascending=False).items():
-            filas_fase.append([Paragraph(str(fase), e["chico"]), _dinero(float(monto))])
-        t_fase = Table(filas_fase, colWidths=[9 * cm, 4.5 * cm])
-        t_fase.setStyle(e["tabla"])
-        elems.append(t_fase)
-
-    # 3. Detalle de gastos del periodo
-    elems.append(Paragraph("3. Detalle de Gastos del Periodo", e["h2"]))
-    if g_per.empty:
-        elems.append(Paragraph("Sin gastos registrados en el periodo.", e["normal"]))
-    else:
-        filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
-        for _, r in g_per.sort_values(["fecha", "id"]).iterrows():
-            filas_g.append([
-                str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["fase"]).split(":")[0], e["chico"]),
-                Paragraph(str(r["tipo"]), e["chico"]), _dinero(float(r["monto"])),
-                Paragraph(str(r["proveedor"] or ""), e["chico"]), Paragraph(str(r["descripcion"]), e["chico"]),
+        # --- Desglose ---
+        elementos.append(Paragraph("2. Desglose: Presupuesto vs. Real", h2))
+        filas_desglose = [["Desglose", "Presupuesto", "Real", "Desviación", "% Ejercido"]]
+        for _, r in tabla_comparativa.iterrows():
+            filas_desglose.append([
+                r["Desglose"], _dinero(r["Presupuesto Base"]), _dinero(r["Gasto Real Realizado"]),
+                _dinero(r["Diferencia / Desviación"]), f"{r['% Ejercido']:.1f}%",
             ])
-        t_g = Table(filas_g, colWidths=[1.2 * cm, 2 * cm, 1.9 * cm, 2.4 * cm, 2.4 * cm, 3.3 * cm, 4.6 * cm],
-                    repeatRows=1)
-        t_g.setStyle(e["tabla"])
-        elems.append(t_g)
+        t_desglose = Table(filas_desglose, colWidths=[6 * cm, 3.2 * cm, 3.2 * cm, 3.2 * cm, 2 * cm])
+        t_desglose.setStyle(estilo_tabla)
+        elementos.append(t_desglose)
 
-    # 4. Pagos del cliente en el periodo
-    elems.append(Paragraph("4. Pagos del Cliente en el Periodo", e["h2"]))
-    p_per = c["p_per"]
-    if p_per.empty:
-        elems.append(Paragraph("Sin pagos registrados en el periodo.", e["normal"]))
-    else:
-        filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
-        for _, r in p_per.sort_values(["fecha", "id"]).iterrows():
-            filas_p.append([str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["concepto"]), e["chico"]),
-                            _dinero(float(r["monto"]))])
-        filas_p.append(["", "", "Total cobrado en el periodo", _dinero(c["cobrado_per"])])
-        t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
-        t_p.setStyle(e["tabla"])
-        elems.append(t_p)
+        # --- Fases ---
+        elementos.append(Paragraph("3. Control por Fases", h2))
+        filas_fases = [["Fase", "Presupuesto", "Real", "% Financ.", "% Físico", "Estado"]]
+        for _, r in df_resumen_fases.iterrows():
+            estado = {"En control": "OK", "Atención": "ATENCIÓN", "Revisar": "REVISAR"}.get(str(r["Estado"]), str(r["Estado"]))
+            filas_fases.append([
+                Paragraph(r["Fase de Obra"], chico), _dinero(r["Total Presupuestado"]),
+                _dinero(r["Total Real Fase"]), f"{r['% Avance Financiero']:.1f}%",
+                f"{r['% Avance Físico']:.0f}%", estado,
+            ])
+        t_fases = Table(filas_fases, colWidths=[6.5 * cm, 3 * cm, 3 * cm, 1.9 * cm, 1.7 * cm, 1.7 * cm])
+        t_fases.setStyle(estilo_tabla)
+        elementos.append(t_fases)
+        elementos.append(Paragraph(
+            "ATENCIÓN = el avance financiero supera al físico por más de 10 puntos "
+            "(posible sobrecosto o adelanto de compras).", chico))
 
-    # 5. Acumulado del proyecto al cierre
-    elems.append(Paragraph("5. Acumulado del Proyecto al Cierre del Periodo", e["h2"]))
-    pct_cierre = (c["gastado_cierre"] / total_presupuestado * 100) if total_presupuestado else 0
-    t_ac = Table([
-        ["Concepto", "Monto"],
-        ["Cobrado acumulado", _dinero(c["cobrado_cierre"])],
-        ["Gastado acumulado", f"{_dinero(c['gastado_cierre'])}  ({pct_cierre:.1f}% del presupuesto)"],
-        ["Presupuesto total contratado", _dinero(total_presupuestado)],
-    ], colWidths=[9 * cm, 8.5 * cm])
-    t_ac.setStyle(e["tabla"])
-    elems.append(t_ac)
+        # --- Bitácora de gastos ---
+        elementos.append(Paragraph("4. Bitácora de Gastos", h2))
+        if df_gastos.empty:
+            elementos.append(Paragraph("Sin gastos registrados.", styles["Normal"]))
+        else:
+            filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
+            for _, r in df_gastos.sort_values(["fecha", "id"]).iterrows():
+                filas_g.append([
+                    str(r["id"]), _f_fecha(r["fecha"]), Paragraph(r["fase"].split(":")[0], chico),
+                    Paragraph(r["tipo"], chico), _dinero(r["monto"]),
+                    Paragraph(str(r["proveedor"] or ""), chico), Paragraph(str(r["descripcion"]), chico),
+                ])
+            t_g = Table(filas_g, colWidths=[1.2 * cm, 2 * cm, 1.9 * cm, 2.4 * cm, 2.4 * cm, 3.3 * cm, 4.6 * cm], repeatRows=1)
+            t_g.setStyle(estilo_tabla)
+            elementos.append(t_g)
 
-    elems.append(Spacer(1, 10))
-    elems.append(Paragraph(f"Documento generado el {datetime.now():%d/%m/%Y %H:%M}.", e["chico"]))
-    doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
-    return buf.getvalue()
+        # --- Pagos del cliente ---
+        elementos.append(Paragraph("5. Pagos del Cliente", h2))
+        if df_pagos.empty:
+            elementos.append(Paragraph("Sin pagos registrados.", styles["Normal"]))
+        else:
+            filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
+            for _, r in df_pagos.sort_values(["fecha", "id"]).iterrows():
+                filas_p.append([str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["concepto"]), chico), _dinero(r["monto"])])
+            filas_p.append(["", "", "TOTAL COBRADO", _dinero(total_cobrado)])
+            t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
+            t_p.setStyle(estilo_tabla)
+            elementos.append(t_p)
+
+        elementos.append(Spacer(1, 16))
+        elementos.append(Paragraph(
+            f"Documento generado automáticamente por el Sistema de Control de Obra "
+            f"(control.hogar911.com) el {datetime.now():%d/%m/%Y a las %H:%M}.", chico))
+
+        doc.build(elementos, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+        return buf.getvalue()
 
 
-with st.expander("📆 Informe por Periodo (estado de cuenta con corte de fechas)"):
-    st.caption("Selecciona el periodo: el informe muestra el saldo acumulado al día anterior, "
-               "los movimientos del periodo y el saldo al cierre.")
-    cp1, cp2 = st.columns(2)
-    desde_per = cp1.date_input("Desde:", format="DD-MM-YYYY", value=(datetime.now() - pd.Timedelta(days=6)).date(), key="inf_per_desde")
-    hasta_per = cp2.date_input("Hasta:", format="DD-MM-YYYY", value=datetime.now().date(), key="inf_per_hasta")
-    if desde_per > hasta_per:
-        st.error("La fecha inicial no puede ser posterior a la final.")
-    else:
-        d_iso, h_iso = desde_per.isoformat(), hasta_per.isoformat()
-        cte = _corte_periodo(d_iso, h_iso)
-        dia_antes_ui = (pd.to_datetime(d_iso) - pd.Timedelta(days=1)).date().isoformat()
-        mp1, mp2, mp3, mp4 = st.columns(4)
-        mp1.metric(f"Saldo al {_f_fecha(dia_antes_ui)}", f"${cte['saldo_inicial']:,.2f}")
-        mp2.metric("Cobrado en el periodo", f"${cte['cobrado_per']:,.2f}")
-        mp3.metric("Gastos del periodo", f"${cte['gastado_per']:,.2f}")
-        mp4.metric(f"Saldo al {_f_fecha(h_iso)}", f"${cte['saldo_final']:,.2f}")
+    def generar_informe_excel() -> bytes:
+        """Informe en Excel con hojas: Resumen, Desglose, Fases, Gastos y Pagos."""
+        from io import BytesIO
+
+        buf = BytesIO()
+        df_resumen = pd.DataFrame({
+            "Concepto": [
+                "Presupuesto Total Contratado", "Total Ejecutado (Real)",
+                "Cobrado al Cliente", "Saldo en Caja (Cobrado - Gastado)",
+            ],
+            "Monto": [total_presupuestado, total_real, total_cobrado, saldo_caja],
+        })
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df_resumen.to_excel(writer, sheet_name="Resumen", index=False)
+            tabla_comparativa.to_excel(writer, sheet_name="Desglose", index=False)
+            df_resumen_fases.drop(columns=["Estado"]).to_excel(writer, sheet_name="Fases", index=False)
+            df_gastos.drop(columns=["comprobante"]).to_excel(writer, sheet_name="Gastos", index=False)
+            df_pagos.to_excel(writer, sheet_name="Pagos", index=False)
+        return buf.getvalue()
+
+
+    col_pdf, col_xls = st.columns(2)
+    fecha_archivo = f"{datetime.now():%Y%m%d}"
+    with col_pdf:
         try:
             st.download_button(
-                "📄 Descargar Informe del Periodo (PDF)",
-                generar_informe_periodo_pdf(d_iso, h_iso),
-                file_name=f"informe_periodo_{d_iso}_a_{h_iso}_JE132.pdf",
+                "📄 Descargar Informe Ejecutivo (PDF)",
+                generar_informe_pdf(),
+                file_name=f"informe_obra_JE132_{fecha_archivo}.pdf",
                 mime="application/pdf",
-                key="dl_inf_periodo",
                 **FULL_WIDTH,
             )
+            st.caption("Ideal para enviar al cliente o imprimir: resumen, fases y bitácoras.")
         except ImportError:
             st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+    with col_xls:
+        try:
+            st.download_button(
+                "📊 Descargar Informe en Excel",
+                generar_informe_excel(),
+                file_name=f"informe_obra_JE132_{fecha_archivo}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                **FULL_WIDTH,
+            )
+            st.caption("Hojas separadas: Resumen, Desglose, Fases, Gastos y Pagos.")
+        except ImportError:
+            st.error("Falta la librería openpyxl. Agrega 'openpyxl' al requirements.txt.")
 
-# ---------------------------------------------------------------
-# VISTA: INFORMES DE AVANCE DE OBRA (admin redacta, cliente consulta)
-# ---------------------------------------------------------------
-seccion_informes_avance(puede_editar=ES_ADMIN)
+
+    # --- Informe por periodo (estado de cuenta con corte de fechas) ---
+    def _corte_periodo(desde: str, hasta: str) -> dict:
+        """Corte financiero: acumulado anterior al periodo, movimientos del periodo y saldo final."""
+        g_antes = df_gastos[df_gastos["fecha"] < desde]
+        g_per = df_gastos[(df_gastos["fecha"] >= desde) & (df_gastos["fecha"] <= hasta)]
+        p_antes = df_pagos[df_pagos["fecha"] < desde]
+        p_per = df_pagos[(df_pagos["fecha"] >= desde) & (df_pagos["fecha"] <= hasta)]
+
+        cobrado_antes = float(p_antes["monto"].sum())
+        gastado_antes = float(g_antes["monto"].sum())
+        saldo_inicial = cobrado_antes - gastado_antes
+        cobrado_per = float(p_per["monto"].sum())
+        gastado_per = float(g_per["monto"].sum())
+        return {
+            "g_per": g_per, "p_per": p_per,
+            "cobrado_antes": cobrado_antes, "gastado_antes": gastado_antes,
+            "saldo_inicial": saldo_inicial,
+            "cobrado_per": cobrado_per, "gastado_per": gastado_per,
+            "saldo_final": saldo_inicial + cobrado_per - gastado_per,
+            "cobrado_cierre": cobrado_antes + cobrado_per,
+            "gastado_cierre": gastado_antes + gastado_per,
+        }
+
+
+    def generar_informe_periodo_pdf(desde: str, hasta: str) -> bytes:
+        """Informe por periodo: saldo al día anterior, movimientos del periodo y saldo al cierre."""
+        from io import BytesIO
+
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+        e = _pdf_estilos()
+        c = _corte_periodo(desde, hasta)
+        dia_antes = (pd.to_datetime(desde) - pd.Timedelta(days=1)).date().isoformat()
+
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
+                                leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                                title=f"Informe por Periodo {desde} a {hasta}")
+
+        encabezado = Table([
+            ["INFORME FINANCIERO POR PERIODO", f"Periodo: {_f_fecha(desde)} al {_f_fecha(hasta)}"],
+            ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", f"Emitido: {datetime.now():%Y-%m-%d}"],
+            ["Cliente: José Manuel Robles Miguel", ""],
+            ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
+        ], colWidths=[12.2 * cm, 6.4 * cm])
+        encabezado.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (0, 0), 13),
+            ("FONTSIZE", (1, 0), (1, 0), 10),
+            ("FONTSIZE", (0, 1), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ]))
+        elems = [encabezado, Spacer(1, 8)]
+
+        # 1. Estado de cuenta del periodo
+        elems.append(Paragraph("1. Estado de Cuenta del Periodo", e["h2"]))
+        t_edo = Table([
+            ["Concepto", "Monto"],
+            [f"Saldo en caja al {_f_fecha(dia_antes)} (cobrado {_dinero(c['cobrado_antes'])} − gastado {_dinero(c['gastado_antes'])})",
+             _dinero(c["saldo_inicial"])],
+            ["(+) Cobrado al cliente en el periodo", _dinero(c["cobrado_per"])],
+            ["(−) Gastos del periodo", _dinero(c["gastado_per"])],
+            [f"Saldo en caja al {_f_fecha(hasta)}", _dinero(c["saldo_final"])],
+        ], colWidths=[13 * cm, 4.5 * cm])
+        t_edo.setStyle(e["tabla"])
+        elems.append(t_edo)
+
+        # 2. Desglose del gasto del periodo
+        elems.append(Paragraph("2. Desglose del Gasto del Periodo", e["h2"]))
+        g_per = c["g_per"]
+        filas_tipo = [["Por tipo", "Monto"]]
+        for tipo in TIPOS_DIRECTOS + [FASE_INDIRECTOS]:
+            filas_tipo.append([tipo, _dinero(float(g_per.loc[g_per["tipo"] == tipo, "monto"].sum()))])
+        filas_tipo.append(["Total del periodo", _dinero(c["gastado_per"])])
+        t_tipo = Table(filas_tipo, colWidths=[9 * cm, 4.5 * cm])
+        t_tipo.setStyle(e["tabla"])
+        elems.append(t_tipo)
+
+        if not g_per.empty:
+            elems.append(Spacer(1, 6))
+            filas_fase = [["Por fase", "Monto"]]
+            for fase, monto in g_per.groupby("fase")["monto"].sum().sort_values(ascending=False).items():
+                filas_fase.append([Paragraph(str(fase), e["chico"]), _dinero(float(monto))])
+            t_fase = Table(filas_fase, colWidths=[9 * cm, 4.5 * cm])
+            t_fase.setStyle(e["tabla"])
+            elems.append(t_fase)
+
+        # 3. Detalle de gastos del periodo
+        elems.append(Paragraph("3. Detalle de Gastos del Periodo", e["h2"]))
+        if g_per.empty:
+            elems.append(Paragraph("Sin gastos registrados en el periodo.", e["normal"]))
+        else:
+            filas_g = [["Folio", "Fecha", "Fase", "Tipo", "Monto", "Proveedor", "Descripción"]]
+            for _, r in g_per.sort_values(["fecha", "id"]).iterrows():
+                filas_g.append([
+                    str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["fase"]).split(":")[0], e["chico"]),
+                    Paragraph(str(r["tipo"]), e["chico"]), _dinero(float(r["monto"])),
+                    Paragraph(str(r["proveedor"] or ""), e["chico"]), Paragraph(str(r["descripcion"]), e["chico"]),
+                ])
+            t_g = Table(filas_g, colWidths=[1.2 * cm, 2 * cm, 1.9 * cm, 2.4 * cm, 2.4 * cm, 3.3 * cm, 4.6 * cm],
+                        repeatRows=1)
+            t_g.setStyle(e["tabla"])
+            elems.append(t_g)
+
+        # 4. Pagos del cliente en el periodo
+        elems.append(Paragraph("4. Pagos del Cliente en el Periodo", e["h2"]))
+        p_per = c["p_per"]
+        if p_per.empty:
+            elems.append(Paragraph("Sin pagos registrados en el periodo.", e["normal"]))
+        else:
+            filas_p = [["Folio", "Fecha", "Concepto", "Monto"]]
+            for _, r in p_per.sort_values(["fecha", "id"]).iterrows():
+                filas_p.append([str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["concepto"]), e["chico"]),
+                                _dinero(float(r["monto"]))])
+            filas_p.append(["", "", "Total cobrado en el periodo", _dinero(c["cobrado_per"])])
+            t_p = Table(filas_p, colWidths=[1.5 * cm, 2.5 * cm, 9 * cm, 4 * cm], repeatRows=1)
+            t_p.setStyle(e["tabla"])
+            elems.append(t_p)
+
+        # 5. Acumulado del proyecto al cierre
+        elems.append(Paragraph("5. Acumulado del Proyecto al Cierre del Periodo", e["h2"]))
+        pct_cierre = (c["gastado_cierre"] / total_presupuestado * 100) if total_presupuestado else 0
+        t_ac = Table([
+            ["Concepto", "Monto"],
+            ["Cobrado acumulado", _dinero(c["cobrado_cierre"])],
+            ["Gastado acumulado", f"{_dinero(c['gastado_cierre'])}  ({pct_cierre:.1f}% del presupuesto)"],
+            ["Presupuesto total contratado", _dinero(total_presupuestado)],
+        ], colWidths=[9 * cm, 8.5 * cm])
+        t_ac.setStyle(e["tabla"])
+        elems.append(t_ac)
+
+        elems.append(Spacer(1, 10))
+        elems.append(Paragraph(f"Documento generado el {datetime.now():%d/%m/%Y %H:%M}.", e["chico"]))
+        doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+        return buf.getvalue()
+
+
+    with st.expander("📆 Informe por Periodo (estado de cuenta con corte de fechas)"):
+        st.caption("Selecciona el periodo: el informe muestra el saldo acumulado al día anterior, "
+                   "los movimientos del periodo y el saldo al cierre.")
+        cp1, cp2 = st.columns(2)
+        desde_per = cp1.date_input("Desde:", format="DD-MM-YYYY", value=(datetime.now() - pd.Timedelta(days=6)).date(), key="inf_per_desde")
+        hasta_per = cp2.date_input("Hasta:", format="DD-MM-YYYY", value=datetime.now().date(), key="inf_per_hasta")
+        if desde_per > hasta_per:
+            st.error("La fecha inicial no puede ser posterior a la final.")
+        else:
+            d_iso, h_iso = desde_per.isoformat(), hasta_per.isoformat()
+            cte = _corte_periodo(d_iso, h_iso)
+            dia_antes_ui = (pd.to_datetime(d_iso) - pd.Timedelta(days=1)).date().isoformat()
+            mp1, mp2, mp3, mp4 = st.columns(4)
+            mp1.metric(f"Saldo al {_f_fecha(dia_antes_ui)}", f"${cte['saldo_inicial']:,.2f}")
+            mp2.metric("Cobrado en el periodo", f"${cte['cobrado_per']:,.2f}")
+            mp3.metric("Gastos del periodo", f"${cte['gastado_per']:,.2f}")
+            mp4.metric(f"Saldo al {_f_fecha(h_iso)}", f"${cte['saldo_final']:,.2f}")
+            try:
+                st.download_button(
+                    "📄 Descargar Informe del Periodo (PDF)",
+                    generar_informe_periodo_pdf(d_iso, h_iso),
+                    file_name=f"informe_periodo_{d_iso}_a_{h_iso}_JE132.pdf",
+                    mime="application/pdf",
+                    key="dl_inf_periodo",
+                    **FULL_WIDTH,
+                )
+            except ImportError:
+                st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
+    # ---------------------------------------------------------------
+    # VISTA: INFORMES DE AVANCE DE OBRA (admin redacta, cliente consulta)
+    # ---------------------------------------------------------------
+    seccion_informes_avance(puede_editar=ES_ADMIN)
 
 # ---------------------------------------------------------------
 # VISTA 6: ADMINISTRACIÓN DE LA BASE DE DATOS (SOLO ADMIN)
 # ---------------------------------------------------------------
-if ES_ADMIN:
+if ES_ADMIN and PAGINA == "Administración":
     st.markdown("---")
     st.subheader("🗄️ Administración de la Base de Datos")
     st.caption(
