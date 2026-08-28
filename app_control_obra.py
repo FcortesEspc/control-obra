@@ -712,6 +712,46 @@ def eliminar_orden_compra(oc_id: int) -> None:
         conn.execute("DELETE FROM ordenes_compra WHERE id = ?", (int(oc_id),))
 
 
+def guardar_tabla_cruda(tabla: str, df: pd.DataFrame) -> None:
+    """Reemplaza el contenido completo de una tabla con lo editado en el explorador.
+    Transaccional: si algo falla (p. ej. folios duplicados), no se guarda nada.
+    Las filas nuevas con id vacío reciben folio automático."""
+    with get_conn() as conn:
+        tablas_validas = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()}
+        if tabla not in tablas_validas:
+            raise ValueError(f"Tabla desconocida: {tabla}")
+        cols_reales = [c[1] for c in conn.execute(f"PRAGMA table_info({tabla})").fetchall()]
+        cols = [c for c in df.columns if c in cols_reales]
+        enteros = {"id", "requisicion_id", "cotizacion_id", "partida_id", "gasto_id"}
+
+        def _limpia(col, v):
+            if pd.isna(v) if not isinstance(v, (list, dict)) else False:
+                return None
+            if col in enteros and v is not None:
+                return int(v)
+            return v
+
+        filas = [[_limpia(c, r[c]) for c in cols] for _, r in df.iterrows()]
+        conn.execute(f"DELETE FROM {tabla}")  # noqa: S608 (tabla validada arriba)
+        marcadores = ",".join("?" * len(cols))
+        if "id" in cols:
+            idx = cols.index("id")
+            con_id = [f for f in filas if f[idx] is not None]
+            sin_id = [[v for j, v in enumerate(f) if j != idx] for f in filas if f[idx] is None]
+            if con_id:
+                conn.executemany(
+                    f"INSERT INTO {tabla} ({','.join(cols)}) VALUES ({marcadores})", con_id)  # noqa: S608
+            if sin_id:
+                cols2 = [c for c in cols if c != "id"]
+                conn.executemany(
+                    f"INSERT INTO {tabla} ({','.join(cols2)}) VALUES ({','.join('?' * len(cols2))})",  # noqa: S608
+                    sin_id)
+        else:
+            conn.executemany(f"INSERT INTO {tabla} ({','.join(cols)}) VALUES ({marcadores})", filas)  # noqa: S608
+
+
 def leer_orden_compra(req_id: int):
     with get_conn() as conn:
         df = pd.read_sql_query(
@@ -2634,6 +2674,8 @@ if ES_ADMIN:
 
     # --- Explorador de tablas ---
     with tab_expl:
+        st.caption("Vista y edición directa de las tablas, como en DB Browser: corrige celdas, agrega o "
+                   "elimina renglones con el ➕/🗑️ del editor, o renumera folios en la columna id.")
         with get_conn() as conn:
             tablas = [
                 r[0] for r in conn.execute(
@@ -2641,10 +2683,36 @@ if ES_ADMIN:
                 ).fetchall()
             ]
         tabla_sel = st.selectbox("Tabla:", tablas)
+        if st.session_state.pop(f"msg_tabla_{tabla_sel}", None):
+            st.success(f"Tabla '{tabla_sel}' guardada.")
+        ver_tabla = st.session_state.setdefault(f"ver_tabla_{tabla_sel}", 0)
         with get_conn() as conn:
             df_tabla = pd.read_sql_query(f"SELECT * FROM {tabla_sel}", conn)  # noqa: S608 (nombre validado contra sqlite_master)
-        st.dataframe(df_tabla, hide_index=True, **FULL_WIDTH)
+        tabla_edit = st.data_editor(
+            df_tabla,
+            num_rows="dynamic",
+            hide_index=True,
+            key=f"raw_{tabla_sel}_{ver_tabla}",
+            **FULL_WIDTH,
+        )
         st.caption(f"{len(df_tabla)} registros en '{tabla_sel}'.")
+        st.warning(
+            "⚠️ Edición avanzada SIN validaciones de negocio. Si renumeras folios (id), cuida las "
+            "referencias cruzadas: `ordenes_compra.gasto_id` ↔ `gastos.id`, "
+            "`cotizacion_precios.partida_id` ↔ `requisicion_partidas.id`, "
+            "`cotizaciones.requisicion_id` ↔ `requisiciones.id`. "
+            "Descarga un respaldo en la pestaña 💾 antes de cambios grandes."
+        )
+        conf_tabla = st.checkbox("Confirmo aplicar los cambios tal como se ven en la tabla",
+                                 key=f"conf_tabla_{tabla_sel}_{ver_tabla}")
+        if st.button("💾 Guardar tabla", disabled=not conf_tabla, key=f"btn_tabla_{tabla_sel}_{ver_tabla}"):
+            try:
+                guardar_tabla_cruda(tabla_sel, tabla_edit)
+                st.session_state[f"msg_tabla_{tabla_sel}"] = True
+                st.session_state[f"ver_tabla_{tabla_sel}"] = ver_tabla + 1
+                st.rerun()
+            except Exception as err:
+                st.error(f"No se guardó nada (la tabla quedó como estaba): {err}")
 
     # --- Consola SQL (solo lectura) ---
     with tab_sql:
