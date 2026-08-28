@@ -116,6 +116,106 @@ except Exception:
 FULL_WIDTH = {"width": "stretch"} if _ver >= (1, 46) else {"use_container_width": True}
 
 
+def _tema_css() -> str:
+    """Tema visual V4: identidad corporativa, tarjetas y ajustes responsive."""
+    return """
+<style>
+:root {
+  --brand-900:#17324d;
+  --brand-800:#214766;
+  --brand-700:#2d5a7b;
+  --accent:#c6923d;
+  --surface:#ffffff;
+  --surface-soft:#f5f7fa;
+  --border:#e3e8ee;
+  --text:#17212b;
+  --muted:#697887;
+  --ok:#2d7a57;
+  --warn:#b97713;
+  --danger:#b54747;
+  --shadow:0 8px 28px rgba(23,50,77,.08);
+}
+html, body, [class*=\"css\"] { font-family: Inter, \"Segoe UI\", Arial, sans-serif; }
+[data-testid=\"stAppViewContainer\"] { background:var(--surface-soft); color:var(--text); }
+[data-testid=\"stHeader\"] { background:rgba(245,247,250,.88); backdrop-filter: blur(10px); }
+[data-testid=\"stSidebar\"] { background:#10283d; border-right:1px solid rgba(255,255,255,.06); }
+[data-testid=\"stSidebar\"] * { color:#eef5fa; }
+[data-testid=\"stSidebar\"] [data-baseweb=\"select\"] > div,
+[data-testid=\"stSidebar\"] input,
+[data-testid=\"stSidebar\"] textarea { background:#17364f !important; border-color:#31536c !important; }
+[data-testid=\"stSidebar\"] .stButton button { width:100%; border-radius:10px; border:1px solid #42627a; }
+.block-container { max-width:1500px; padding-top:1.35rem; padding-bottom:4rem; }
+hr { border:none !important; border-top:1px solid var(--border) !important; margin:1.5rem 0 !important; }
+h1,h2,h3 { color:var(--brand-900); letter-spacing:-.02em; }
+.obra-hero {
+  background:linear-gradient(125deg,#17324d 0%,#214766 62%,#2d5a7b 100%);
+  border-radius:18px; padding:26px 30px; color:white; box-shadow:var(--shadow);
+  margin:0 0 22px 0; position:relative; overflow:hidden;
+}
+.obra-hero:after { content:""; position:absolute; right:-70px; top:-95px; width:280px; height:280px; border:1px solid rgba(255,255,255,.12); border-radius:50%; }
+.obra-hero .eyebrow { font-size:.76rem; text-transform:uppercase; letter-spacing:.14em; opacity:.75; font-weight:700; }
+.obra-hero h1 { color:white; font-size:1.7rem; margin:.2rem 0 .35rem 0; }
+.obra-hero p { margin:0; color:#d9e6ef; font-size:.95rem; }
+.obra-hero .status { display:inline-block; margin-top:14px; padding:5px 10px; border-radius:999px; background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.17); font-size:.78rem; font-weight:700; }
+.obra-section-label { color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.11em; font-weight:800; margin:8px 0 2px; }
+.obra-section-title { color:var(--brand-900); font-size:1.28rem; font-weight:800; margin:0 0 14px; }
+.obra-kpi {
+  background:var(--surface); border:1px solid var(--border); border-radius:15px;
+  padding:17px 18px 15px; box-shadow:0 4px 18px rgba(23,50,77,.045); min-height:118px;
+}
+.obra-kpi .k-label { color:var(--muted); font-size:.76rem; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }
+.obra-kpi .k-value { color:var(--brand-900); font-size:1.58rem; font-weight:800; margin-top:7px; line-height:1.1; }
+.obra-kpi .k-foot { color:var(--muted); font-size:.78rem; margin-top:8px; }
+.obra-kpi .k-foot.ok { color:var(--ok); font-weight:700; }
+.obra-kpi .k-foot.warn { color:var(--warn); font-weight:700; }
+.obra-kpi .k-foot.danger { color:var(--danger); font-weight:700; }
+div[data-testid=\"stDataFrame\"] { background:white; border:1px solid var(--border); border-radius:14px; overflow:hidden; box-shadow:0 4px 18px rgba(23,50,77,.035); }
+[data-testid=\"stExpander\"] { background:white; border:1px solid var(--border) !important; border-radius:12px !important; }
+.stTabs [data-baseweb=\"tab-list\"] { gap:7px; background:#eef2f6; padding:5px; border-radius:12px; }
+.stTabs [data-baseweb=\"tab\"] { border-radius:9px; padding:8px 13px; }
+.stTabs [aria-selected=\"true\"] { background:white !important; box-shadow:0 2px 8px rgba(23,50,77,.08); }
+.stButton button, .stDownloadButton button { border-radius:10px !important; font-weight:700 !important; }
+[data-testid=\"stAlert\"] { border-radius:12px; }
+[data-testid=\"stProgress\"] > div > div { border-radius:999px; }
+.obra-note { background:#fff; border:1px solid var(--border); border-left:4px solid var(--accent); border-radius:10px; padding:12px 14px; color:var(--muted); font-size:.88rem; }
+@media (max-width: 900px) {
+  .block-container { padding-left:1rem; padding-right:1rem; }
+  .obra-hero { padding:20px 18px; border-radius:14px; }
+  .obra-hero h1 { font-size:1.35rem; }
+  .obra-kpi { min-height:auto; }
+}
+</style>
+"""
+
+
+def _estado_desviacion(diferencia_puntos: float) -> tuple[str, str]:
+    """Clasifica la diferencia financiero-físico en un estado visual simple."""
+    d = abs(float(diferencia_puntos))
+    if d <= 7:
+        return "En control", "ok"
+    if d <= 15:
+        return "Atención", "warn"
+    return "Revisar", "danger"
+
+
+def _kpi_html(etiqueta: str, valor: str, pie: str = "", clase: str = "") -> str:
+    return (
+        f'<div class="obra-kpi"><div class="k-label">{etiqueta}</div>'
+        f'<div class="k-value">{valor}</div>'
+        f'<div class="k-foot {clase}">{pie}</div></div>'
+    )
+
+
+def _titulo_seccion(supra: str, titulo: str) -> None:
+    st.markdown(
+        f'<div class="obra-section-label">{supra}</div><div class="obra-section-title">{titulo}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+st.markdown(_tema_css(), unsafe_allow_html=True)
+
+
 def _f_fecha(v) -> str:
     """Formatea cualquier fecha (str ISO, date o Timestamp) como DD-MM-AAAA para mostrarla.
     El almacenamiento en la base de datos permanece en formato ISO (AAAA-MM-DD)."""
@@ -781,17 +881,28 @@ def guardar_avance_fisico(avances: dict) -> None:
 init_db()
 
 # ---------------------------------------------------------------
-# ENCABEZADO
+# ENCABEZADO V4
 # ---------------------------------------------------------------
-st.title("🏗️ Sistema de Control de Ejecución de Obra")
-st.subheader("Proyecto: Construcción Vivienda Familiar Tres Niveles (JE132)")
-st.caption("Cliente: José Manuel Robles Miguel | Contratistas: DACAM & HOGAR 911")
+rol_hero = {"admin": "Administrador", "residente": "Residente de Obra", "cliente": "Cliente"}.get(
+    st.session_state.get("rol", "admin"), "Administrador"
+)
+st.markdown(
+    f'''<div class="obra-hero">
+      <div class="eyebrow">DACAM × HOGAR 911 · Control integral de obra</div>
+      <h1>Residencia JE132</h1>
+      <p>Construcción Vivienda Familiar Tres Niveles · Cliente: José Manuel Robles Miguel</p>
+      <span class="status">● Proyecto en curso &nbsp;·&nbsp; {rol_hero}</span>
+    </div>''',
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------
 # PANEL LATERAL
 # ---------------------------------------------------------------
 rol_etiquetas = {"admin": "👷 Administrador", "residente": "📐 Residente de Obra", "cliente": "👤 Cliente (solo consulta)"}
 rol_texto = rol_etiquetas.get(st.session_state.get("rol", "admin"), "👷 Administrador")
+st.sidebar.markdown("### CONTROL DE OBRA")
+st.sidebar.caption("Residencia JE132")
 st.sidebar.markdown(f"**Sesión:** {rol_texto}")
 if (os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
         or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")):
@@ -1882,21 +1993,24 @@ if ES_RESIDENTE:
 # ---------------------------------------------------------------
 pct_ejercido = (total_real / total_presupuestado * 100) if total_presupuestado else 0
 pct_cobrado = (total_cobrado / total_presupuestado * 100) if total_presupuestado else 0
+pesos_fase_global = df_presupuesto.set_index("Fase")["Subtotal Costo Directo"]
+if pesos_fase_global.sum():
+    avance_general = sum(avance_fisico.get(f, 0) * pesos_fase_global[f] for f in FASES) / pesos_fase_global.sum()
+else:
+    avance_general = 0.0
 
 if not ES_ADMIN:
     # ---------- DASHBOARD AMIGABLE PARA EL CLIENTE ----------
-    st.header("🏠 Así va tu obra")
+    _titulo_seccion("Tu proyecto", "Así va tu obra")
 
-    pesos_fase = df_presupuesto.set_index("Fase")["Subtotal Costo Directo"]
-    avance_general = sum(avance_fisico.get(f, 0) * pesos_fase[f] for f in FASES) / pesos_fase.sum()
     st.progress(min(int(round(avance_general)), 100),
-                text=f"🏗️ Avance físico general de tu casa: {avance_general:.0f}%")
+                text=f"Avance físico general: {avance_general:.0f}%")
     st.caption("Promedio del avance en campo de cada etapa, ponderado por su tamaño en el presupuesto.")
 
     cc1, cc2, cc3 = st.columns(3)
-    cc1.metric("💰 Valor de tu proyecto", f"${total_presupuestado:,.0f}")
-    cc2.metric("✅ Has pagado", f"${total_cobrado:,.0f}", f"{pct_cobrado:.0f}% del total", delta_color="off")
-    cc3.metric("🧱 Invertido en tu obra", f"${total_real:,.0f}", f"{pct_ejercido:.0f}% del presupuesto", delta_color="off")
+    cc1.markdown(_kpi_html("Valor del proyecto", f"${total_presupuestado:,.0f}", "Presupuesto contratado"), unsafe_allow_html=True)
+    cc2.markdown(_kpi_html("Pagado", f"${total_cobrado:,.0f}", f"{pct_cobrado:.0f}% del total", "ok"), unsafe_allow_html=True)
+    cc3.markdown(_kpi_html("Invertido en obra", f"${total_real:,.0f}", f"{pct_ejercido:.0f}% del presupuesto", "ok"), unsafe_allow_html=True)
 
     st.subheader("📊 Avance por etapa")
     for fase_cli in FASES:
@@ -1922,22 +2036,15 @@ if not ES_ADMIN:
     st.markdown("---")
 
 if ES_ADMIN:
-    st.header("📊 Resumen Financiero del Proyecto")
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("Presupuesto Total Contratado", f"${total_presupuestado:,.2f}")
-    with col2:
-        st.metric("Total Ejecutado (Real)", f"${total_real:,.2f}", f"{pct_ejercido:.1f}% del presupuesto", delta_color="off")
-    with col3:
-        st.metric("Cobrado al Cliente", f"${total_cobrado:,.2f}", f"{pct_cobrado:.1f}% del contrato", delta_color="off")
-    with col4:
-        st.metric(
-            "Saldo en Caja (Cobrado − Gastado)",
-            f"${saldo_caja:,.2f}",
-            delta=f"${saldo_caja:,.2f}",
-            delta_color="normal",
-        )
+    _titulo_seccion("Resumen ejecutivo", "Situación financiera del proyecto")
+    estado_caja, clase_caja = (("Caja disponible", "ok") if saldo_caja >= 0 else ("Déficit de caja", "danger"))
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.markdown(_kpi_html("Presupuesto contratado", f"${total_presupuestado:,.0f}", "Base contractual vigente"), unsafe_allow_html=True)
+    col2.markdown(_kpi_html("Ejecutado real", f"${total_real:,.0f}", f"{pct_ejercido:.1f}% del presupuesto", "warn" if pct_ejercido > 85 else "ok"), unsafe_allow_html=True)
+    col3.markdown(_kpi_html("Avance físico", f"{avance_general:.0f}%", "Promedio ponderado de fases", "ok"), unsafe_allow_html=True)
+    col4.markdown(_kpi_html("Cobrado al cliente", f"${total_cobrado:,.0f}", f"{pct_cobrado:.1f}% del contrato", "ok"), unsafe_allow_html=True)
+    col5.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.0f}", estado_caja, clase_caja), unsafe_allow_html=True)
+    st.progress(min(int(round(avance_general)), 100), text=f"Avance físico general del proyecto: {avance_general:.0f}%")
 
 if saldo_caja < 0 and ES_ADMIN:
     st.warning("⚠️ El gasto ejecutado supera lo cobrado al cliente. Considera solicitar la siguiente estimación.")
@@ -1948,7 +2055,7 @@ st.markdown("---")
 # VISTA 2: COMPARATIVO POR DESGLOSE PRINCIPAL
 # ---------------------------------------------------------------
 if ES_ADMIN:
-    st.subheader("🔍 Análisis Desglosado: Presupuesto vs. Real")
+    _titulo_seccion("Control financiero", "Presupuesto vs. gasto real")
 
 tabla_comparativa = pd.DataFrame({
     "Desglose": ["Materiales (Suministros)", "Mano de Obra", "Gastos Indirectos", "TOTAL"],
@@ -1986,7 +2093,7 @@ st.markdown("---")
 # VISTA 3: CONTROL POR FASES (FINANCIERO + FÍSICO)
 # ---------------------------------------------------------------
 if ES_ADMIN:
-    st.subheader("📋 Control por Fases Cronológicas")
+    _titulo_seccion("Avance", "Control físico y financiero por fases")
 
 resumen_fases = []
 for _, row in df_presupuesto.iterrows():
@@ -2013,8 +2120,8 @@ for _, row in df_presupuesto.iterrows():
     })
 
 df_resumen_fases = pd.DataFrame(resumen_fases)
-df_resumen_fases["Alerta"] = df_resumen_fases.apply(
-    lambda r: "🔴" if r["% Avance Financiero"] - r["% Avance Físico"] > 10 else "🟢", axis=1
+df_resumen_fases["Estado"] = df_resumen_fases.apply(
+    lambda r: _estado_desviacion(r["% Avance Financiero"] - r["% Avance Físico"])[0], axis=1
 )
 
 if ES_ADMIN:
@@ -2032,8 +2139,8 @@ if ES_ADMIN:
         }),
         **FULL_WIDTH,
     )
-    st.caption("🔴 = el gasto avanza más de 10 puntos por encima del avance físico (posible sobrecosto o adelanto de compras). "
-               "'Indirectos Fase' es informativo: el % de avance financiero se calcula solo contra el costo directo presupuestado (materiales + mano de obra).")
+    st.caption("Estado compara la separación entre avance financiero y físico: hasta 7 puntos = En control; 8-15 = Atención; más de 15 = Revisar. "
+               "'Indirectos Fase' es informativo: el % financiero se calcula contra el costo directo presupuestado.")
 
 df_chart = pd.DataFrame({
     "Fase": [f.split(":")[0] for f in df_resumen_fases["Fase de Obra"]],
@@ -2048,7 +2155,7 @@ st.markdown("---")
 # ---------------------------------------------------------------
 # VISTA 4: BITÁCORAS (GASTOS Y PAGOS)
 # ---------------------------------------------------------------
-st.subheader("📜 Bitácoras del Proyecto" if ES_ADMIN else "🧾 Movimientos de tu obra (gastos y pagos)")
+_titulo_seccion("Bitácora", "Movimientos del proyecto" if ES_ADMIN else "Gastos y pagos de tu obra")
 
 tab_gastos, tab_pagos = st.tabs(["Gastos y destajos", "Pagos del cliente"])
 
