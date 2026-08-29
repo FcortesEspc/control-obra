@@ -1519,9 +1519,61 @@ def seccion_requisiciones():
     st.markdown("---")
     st.subheader("🧾 Requisiciones de Material y Compras")
 
-    t_nueva, t_seg, t_cot, t_comp = st.tabs([
+    t_nueva, t_seg, t_cot, t_comp, t_directo = st.tabs([
         "➕ Nueva requisición", "📋 Seguimiento", "💰 Capturar cotización", "⚖️ Comparativo y Orden de Compra",
+        "💵 Gasto directo",
     ])
+
+    # ------ GASTO DIRECTO (sin requisición: mano de obra, indirectos, compras menores) ------
+    with t_directo:
+        if st.session_state.pop("msg_gasto_directo", None):
+            st.success(st.session_state.pop("msg_gasto_directo_txt", "Gasto registrado."))
+        st.caption("Para pagos que no llevan cotización: destajos de mano de obra, gastos indirectos "
+                   "y compras menores. Queda registrado directo en la bitácora del control financiero. "
+                   "Las compras de material importantes siguen el flujo Requisición → Cotización → Orden de Compra.")
+
+        fase_gd = st.selectbox("Fase:", FASES + [FASE_INDIRECTOS], key="gd_fase")
+        if fase_gd == FASE_INDIRECTOS:
+            tipo_gd = FASE_INDIRECTOS
+            st.caption("Indirectos generales del proyecto, sin fase específica.")
+        else:
+            tipo_gd = st.selectbox("Tipo de desglose:", TIPOS_DIRECTOS + [FASE_INDIRECTOS],
+                                   index=1, key="gd_tipo")
+            if tipo_gd == FASE_INDIRECTOS:
+                st.caption("Gasto indirecto asociado a esta fase (supervisión, gestión, trámites, etc.).")
+
+        with st.form("form_gasto_directo", clear_on_submit=True):
+            gd1, gd2 = st.columns(2)
+            fecha_gd = gd1.date_input("Fecha del gasto:", format="DD-MM-YYYY", value=datetime.now().date(),
+                                      key="gd_fecha")
+            monto_gd = gd2.number_input("Monto ($ MXN):", min_value=0.0, step=500.0, key="gd_monto")
+            proveedor_gd = st.text_input("Proveedor / Beneficiario (Ej. cuadrilla, destajista, dependencia):",
+                                         key="gd_prov")
+            descripcion_gd = st.text_input("Descripción (Ej. Destajo losa entrepiso, Pago de licencia):",
+                                           key="gd_desc")
+            comprobante_gd = st.file_uploader(
+                "Comprobante (foto de recibo, lista de raya o PDF — opcional):",
+                type=["jpg", "jpeg", "png", "webp", "pdf"], key="gd_comp",
+            )
+            if st.form_submit_button("💾 Registrar gasto directo"):
+                if monto_gd <= 0:
+                    st.error("El monto debe ser mayor a 0.")
+                elif not descripcion_gd.strip():
+                    st.error("La descripción es obligatoria para la bitácora.")
+                else:
+                    nuevo_gid = insertar_gasto(
+                        fecha_gd.isoformat(), fase_gd, tipo_gd,
+                        monto_gd, proveedor_gd, descripcion_gd,
+                    )
+                    tuvo_comp = False
+                    if comprobante_gd is not None:
+                        tuvo_comp = guardar_comprobante(nuevo_gid, comprobante_gd) is not None
+                    st.session_state["msg_gasto_directo"] = True
+                    st.session_state["msg_gasto_directo_txt"] = (
+                        f"Gasto directo folio {nuevo_gid} registrado"
+                        + (" con comprobante 📎." if tuvo_comp else ". Puedes adjuntar el comprobante después en la Bitácora.")
+                    )
+                    st.rerun()
 
     # ------ NUEVA REQUISICIÓN ------
     with t_nueva:
