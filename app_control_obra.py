@@ -958,7 +958,7 @@ PAGINA = st.sidebar.radio(
 if (os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
         or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")):
     st.sidebar.markdown("---")
-    if st.sidebar.button("Cerrar sesión", use_container_width=True):
+    if st.sidebar.button("Cerrar sesión", **FULL_WIDTH):
         st.session_state.pop("rol", None)
         st.session_state.pop("autenticado", None)
         st.rerun()
@@ -1282,11 +1282,11 @@ def generar_alertas_ejecutivas(
     alertas: list[tuple[str, str]] = []
     saldo_proyectado = saldo_caja_ - comprometido_pendiente_
     if saldo_caja_ < 0:
-        alertas.append(("error", f"Déficit de caja actual: ${abs(saldo_caja_):,.0f}."))
+        alertas.append(("error", f"Déficit de caja actual: ${abs(saldo_caja_):,.2f}."))
     elif saldo_proyectado < 0:
-        alertas.append(("warning", f"Las OC pendientes llevarían la caja a ${saldo_proyectado:,.0f}."))
+        alertas.append(("warning", f"Las OC pendientes llevarían la caja a ${saldo_proyectado:,.2f}."))
     if comprometido_pendiente_ > 0:
-        alertas.append(("info", f"Comprometido en OC aún no vinculado a gasto: ${comprometido_pendiente_:,.0f}."))
+        alertas.append(("info", f"Comprometido en OC aún no vinculado a gasto: ${comprometido_pendiente_:,.2f}."))
 
     brecha_global = pct_ejercido_ - avance_general_
     if brecha_global > 15:
@@ -2335,9 +2335,9 @@ if PAGINA == "Gastos y Pagos" and ES_ADMIN:
     _titulo_seccion("Operación", "Gastos y pagos")
     st.caption("Registra movimientos desde el panel lateral y consulta aquí el efecto inmediato en caja y ejecución.")
     cg1, cg2, cg3, cg4 = st.columns(4)
-    cg1.markdown(_kpi_html("Cobrado acumulado", f"${total_cobrado:,.0f}", "Pagos recibidos del cliente", "ok"), unsafe_allow_html=True)
-    cg2.markdown(_kpi_html("Gasto ejecutado", f"${total_real:,.0f}", "Costo real registrado", "warn" if total_real > total_cobrado else "ok"), unsafe_allow_html=True)
-    cg3.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.0f}", "Cobrado menos gasto", "danger" if saldo_caja < 0 else "ok"), unsafe_allow_html=True)
+    cg1.markdown(_kpi_html("Cobrado acumulado", f"${total_cobrado:,.2f}", "Pagos recibidos del cliente", "ok"), unsafe_allow_html=True)
+    cg2.markdown(_kpi_html("Gasto ejecutado", f"${total_real:,.2f}", "Costo real registrado", "warn" if total_real > total_cobrado else "ok"), unsafe_allow_html=True)
+    cg3.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.2f}", "Cobrado menos gasto", "danger" if saldo_caja < 0 else "ok"), unsafe_allow_html=True)
     cg4.markdown(_kpi_html("Movimientos", f"{len(df_gastos) + len(df_pagos):,}", "Gastos + pagos", "ok"), unsafe_allow_html=True)
 
     st.markdown("#### Movimientos recientes")
@@ -2388,9 +2388,9 @@ if PAGINA == "Inicio":
         st.caption("Promedio del avance en campo de cada etapa, ponderado por su tamaño en el presupuesto.")
 
         cc1, cc2, cc3 = st.columns(3)
-        cc1.markdown(_kpi_html("Valor del proyecto", f"${total_presupuestado:,.0f}", "Presupuesto contratado"), unsafe_allow_html=True)
-        cc2.markdown(_kpi_html("Pagado", f"${total_cobrado:,.0f}", f"{pct_cobrado:.0f}% del total", "ok"), unsafe_allow_html=True)
-        cc3.markdown(_kpi_html("Invertido en obra", f"${total_real:,.0f}", f"{pct_ejercido:.0f}% del presupuesto", "ok"), unsafe_allow_html=True)
+        cc1.markdown(_kpi_html("Valor del proyecto", f"${total_presupuestado:,.2f}", "Presupuesto contratado"), unsafe_allow_html=True)
+        cc2.markdown(_kpi_html("Pagado", f"${total_cobrado:,.2f}", f"{pct_cobrado:.0f}% del total", "ok"), unsafe_allow_html=True)
+        cc3.markdown(_kpi_html("Invertido en obra", f"${total_real:,.2f}", f"{pct_ejercido:.0f}% del presupuesto", "ok"), unsafe_allow_html=True)
 
         st.subheader("📊 Avance por etapa")
         for fase_cli in FASES:
@@ -2419,16 +2419,16 @@ if PAGINA == "Inicio":
         _titulo_seccion("Resumen ejecutivo", "Situación integral del proyecto")
         estado_caja, clase_caja = (("Caja disponible", "ok") if saldo_caja >= 0 else ("Déficit de caja", "danger"))
         col1, col2, col3, col4 = st.columns(4)
-        col1.markdown(_kpi_html("Presupuesto contratado", f"${total_presupuestado:,.0f}", "Base contractual vigente"), unsafe_allow_html=True)
-        col2.markdown(_kpi_html("Ejecutado real", f"${total_real:,.0f}", f"{pct_ejercido:.1f}% del presupuesto", "warn" if pct_ejercido > 85 else "ok"), unsafe_allow_html=True)
+        col1.markdown(_kpi_html("Presupuesto contratado", f"${total_presupuestado:,.2f}", "Base contractual vigente"), unsafe_allow_html=True)
+        col2.markdown(_kpi_html("Ejecutado real", f"${total_real:,.2f}", f"{pct_ejercido:.1f}% del presupuesto", "warn" if pct_ejercido > 85 else "ok"), unsafe_allow_html=True)
         col3.markdown(_kpi_html("Avance físico", f"{avance_general:.0f}%", "Promedio ponderado de fases", "ok"), unsafe_allow_html=True)
-        col4.markdown(_kpi_html("Cobrado al cliente", f"${total_cobrado:,.0f}", f"{pct_cobrado:.1f}% del contrato", "ok"), unsafe_allow_html=True)
+        col4.markdown(_kpi_html("Cobrado al cliente", f"${total_cobrado:,.2f}", f"{pct_cobrado:.1f}% del contrato", "ok"), unsafe_allow_html=True)
 
         col5, col6, col7, col8 = st.columns(4)
-        col5.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.0f}", estado_caja, clase_caja), unsafe_allow_html=True)
-        col6.markdown(_kpi_html("Comprometido en OC", f"${comprometido_pendiente:,.0f}", f"{len(oc_pendientes)} órdenes pendientes", "warn" if comprometido_pendiente else "ok"), unsafe_allow_html=True)
-        col7.markdown(_kpi_html("Caja proyectada", f"${saldo_proyectado:,.0f}", "Caja menos OC pendientes", "danger" if saldo_proyectado < 0 else "ok"), unsafe_allow_html=True)
-        col8.markdown(_kpi_html("OC emitidas", f"${total_oc_emitido:,.0f}", f"{len(df_ordenes_resumen)} órdenes registradas", "ok"), unsafe_allow_html=True)
+        col5.markdown(_kpi_html("Saldo en caja", f"${saldo_caja:,.2f}", estado_caja, clase_caja), unsafe_allow_html=True)
+        col6.markdown(_kpi_html("Comprometido en OC", f"${comprometido_pendiente:,.2f}", f"{len(oc_pendientes)} órdenes pendientes", "warn" if comprometido_pendiente else "ok"), unsafe_allow_html=True)
+        col7.markdown(_kpi_html("Caja proyectada", f"${saldo_proyectado:,.2f}", "Caja menos OC pendientes", "danger" if saldo_proyectado < 0 else "ok"), unsafe_allow_html=True)
+        col8.markdown(_kpi_html("OC emitidas", f"${total_oc_emitido:,.2f}", f"{len(df_ordenes_resumen)} órdenes registradas", "ok"), unsafe_allow_html=True)
         st.progress(min(int(round(avance_general)), 100), text=f"Avance físico general del proyecto: {avance_general:.0f}%")
 
         st.markdown("#### Alertas ejecutivas")
@@ -2457,7 +2457,7 @@ if PAGINA == "Inicio":
             else:
                 df_cf = df_flujo_mensual.set_index("Mes")[["Cobros", "Gastos"]]
                 st.bar_chart(df_cf, **FULL_WIDTH)
-                st.caption(f"Saldo acumulado registrado: ${float(df_flujo_mensual.iloc[-1]['Saldo acumulado']):,.0f}.")
+                st.caption(f"Saldo acumulado registrado: ${float(df_flujo_mensual.iloc[-1]['Saldo acumulado']):,.2f}.")
         with gc2:
             st.markdown("#### Compromisos de compra")
             if df_ordenes_resumen.empty:
@@ -2476,7 +2476,7 @@ if PAGINA == "Inicio":
                     )
                     st.dataframe(
                         detalle_oc.style.format({"Total": "${:,.2f}"}),
-                        use_container_width=True, hide_index=True,
+                        hide_index=True, **FULL_WIDTH,
                     )
 
     if saldo_caja < 0 and ES_ADMIN:
