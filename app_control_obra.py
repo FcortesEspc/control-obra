@@ -1003,20 +1003,6 @@ if ES_ADMIN and PAGINA == "Gastos y Pagos":
                     else:
                         st.success(f"¡Gasto #{nuevo_id} registrado!")
 
-    with st.sidebar.expander("Registrar pago del cliente"):
-        st.caption("Anticipo, estimaciones y pagos parciales. El saldo en caja se calcula contra estos cobros.")
-        with st.form("form_pago", clear_on_submit=True):
-            fecha_pago = st.date_input("Fecha del pago:", format="DD-MM-YYYY", value=datetime.now().date(), key="p_fecha")
-            concepto_pago = st.text_input("Concepto (Ej. Anticipo inicial, Estimación 1):")
-            monto_pago = st.number_input("Monto ($ MXN):", min_value=0.0, step=1000.0, key="p_monto")
-            if st.form_submit_button("Guardar pago"):
-                if monto_pago <= 0:
-                    st.error("El monto debe ser mayor a 0.")
-                elif not concepto_pago.strip():
-                    st.error("El concepto es obligatorio.")
-                else:
-                    insertar_pago(fecha_pago.isoformat(), concepto_pago, monto_pago)
-                    st.success("¡Pago registrado!")
 
 if ES_ADMIN and PAGINA == "Avance de Obra":
     st.sidebar.header("Avance físico")
@@ -2333,7 +2319,29 @@ if ES_RESIDENTE and PAGINA == "Informes":
 
 if PAGINA == "Gastos y Pagos" and ES_ADMIN:
     _titulo_seccion("Operación", "Gastos y pagos")
-    st.caption("Registra movimientos desde el panel lateral y consulta aquí el efecto inmediato en caja y ejecución.")
+    st.caption("Registra el gasto desde el panel lateral y el pago del cliente aquí abajo; "
+               "consulta el efecto inmediato en caja y ejecución.")
+
+    if st.session_state.pop("msg_pago_ok", None):
+        st.success("¡Pago registrado!")
+    with st.expander("💳 Registrar pago del cliente", expanded=True):
+        st.caption("Anticipo, estimaciones y pagos parciales. El saldo en caja se calcula contra estos cobros.")
+        with st.form("form_pago_main", clear_on_submit=True):
+            fp1, fp2 = st.columns(2)
+            fecha_pago = fp1.date_input("Fecha del pago:", format="DD-MM-YYYY", value=datetime.now().date(),
+                                        key="p_fecha_main")
+            monto_pago = fp2.number_input("Monto ($ MXN):", min_value=0.0, step=1000.0, key="p_monto_main")
+            concepto_pago = st.text_input("Concepto (Ej. Anticipo inicial, Estimación 1):", key="p_concepto_main")
+            if st.form_submit_button("💾 Guardar pago"):
+                if monto_pago <= 0:
+                    st.error("El monto debe ser mayor a 0.")
+                elif not concepto_pago.strip():
+                    st.error("El concepto es obligatorio.")
+                else:
+                    insertar_pago(fecha_pago.isoformat(), concepto_pago, monto_pago)
+                    st.session_state["msg_pago_ok"] = True
+                    st.rerun()
+
     cg1, cg2, cg3, cg4 = st.columns(4)
     cg1.markdown(_kpi_html("Cobrado acumulado", f"${total_cobrado:,.2f}", "Pagos recibidos del cliente", "ok"), unsafe_allow_html=True)
     cg2.markdown(_kpi_html("Gasto ejecutado", f"${total_real:,.2f}", "Costo real registrado", "warn" if total_real > total_cobrado else "ok"), unsafe_allow_html=True)
