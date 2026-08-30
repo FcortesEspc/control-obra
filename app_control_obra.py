@@ -2898,7 +2898,7 @@ if PAGINA == "Bitácora":
                     **FULL_WIDTH,
                 )
 
-if PAGINA == "Informes":
+if ES_ADMIN and PAGINA == "Informes":
     # ---------------------------------------------------------------
     # VISTA 5: GENERACIÓN DE INFORMES (PDF Y EXCEL)
     # ---------------------------------------------------------------
@@ -3562,9 +3562,148 @@ if PAGINA == "Informes":
             except ImportError:
                 st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
 
-    # ---------------------------------------------------------------
-    # VISTA: INFORMES DE AVANCE DE OBRA (admin redacta, cliente consulta)
-    # ---------------------------------------------------------------
+# ---------------------------------------------------------------
+# VISTA 5-B: INFORME SEMANAL SIMPLIFICADO (SOLO CLIENTE)
+# ---------------------------------------------------------------
+if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
+    st.subheader("📄 Informe de tu Semana")
+    st.caption("Consulta los gastos y pagos de la semana que quieras: la actual por defecto, "
+               "o cualquier semana o rango de semanas de la obra.")
+
+    inicio_s1_cli = _inicio_semana1()
+    if not inicio_s1_cli:
+        st.info("El administrador aún no configuró el inicio de semanas de la obra. "
+                "Mientras tanto, puedes consultar todos tus movimientos en 🧾 Bitácora.")
+    else:
+        semana_actual_cli = _semana_de_fecha(datetime.now().date(), inicio_s1_cli)
+        csc1, csc2 = st.columns(2)
+        semana_desde_cli = csc1.number_input("Semana desde:", min_value=1, step=1,
+                                             value=max(1, semana_actual_cli), key="cli_semana_desde")
+        semana_hasta_cli = csc2.number_input("Semana hasta:", min_value=1, step=1,
+                                             value=int(semana_desde_cli), key="cli_semana_hasta")
+        if semana_hasta_cli < semana_desde_cli:
+            st.error("La semana final no puede ser anterior a la semana inicial.")
+        else:
+            ini_sem_cli, _ = _rango_semana(int(semana_desde_cli), inicio_s1_cli)
+            _, fin_sem_cli = _rango_semana(int(semana_hasta_cli), inicio_s1_cli)
+            alcance_cli = (f"Semana {int(semana_desde_cli)}" if semana_desde_cli == semana_hasta_cli
+                          else f"Semana {int(semana_desde_cli)} a Semana {int(semana_hasta_cli)}")
+            st.caption(f"**{alcance_cli}**: lunes {_f_fecha(ini_sem_cli)} a domingo {_f_fecha(fin_sem_cli)}.")
+
+            df_g_cli = df_gastos[(df_gastos["fecha"] >= ini_sem_cli.isoformat())
+                                 & (df_gastos["fecha"] <= fin_sem_cli.isoformat())]
+            df_p_cli = df_pagos[(df_pagos["fecha"] >= ini_sem_cli.isoformat())
+                                & (df_pagos["fecha"] <= fin_sem_cli.isoformat())]
+            total_g_cli = float(df_g_cli["monto"].sum())
+            total_p_cli = float(df_p_cli["monto"].sum())
+
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Gastos de la semana", f"${total_g_cli:,.2f}")
+            mc2.metric("Pagos de la semana", f"${total_p_cli:,.2f}")
+            mc3.metric("Diferencia", f"${total_p_cli - total_g_cli:,.2f}")
+
+            st.markdown("#### 💸 Gastos")
+            if df_g_cli.empty:
+                st.info("Sin gastos registrados en este alcance.")
+            else:
+                dfg_v = df_g_cli[["fecha", "monto", "proveedor", "descripcion"]].copy().sort_values(
+                    "fecha", ascending=False)
+                dfg_v["fecha"] = dfg_v["fecha"].map(_f_fecha)
+                st.dataframe(
+                    dfg_v.rename(columns={"fecha": "Fecha", "monto": "Monto", "proveedor": "Proveedor",
+                                          "descripcion": "Descripción"})
+                    .style.format({"Monto": "${:,.2f}"}),
+                    hide_index=True, **FULL_WIDTH,
+                )
+
+            st.markdown("#### 💳 Pagos")
+            if df_p_cli.empty:
+                st.info("Sin pagos registrados en este alcance.")
+            else:
+                dfp_v = df_p_cli[["fecha", "concepto", "monto"]].copy().sort_values("fecha", ascending=False)
+                dfp_v["fecha"] = dfp_v["fecha"].map(_f_fecha)
+                st.dataframe(
+                    dfp_v.rename(columns={"fecha": "Fecha", "concepto": "Concepto", "monto": "Monto"})
+                    .style.format({"Monto": "${:,.2f}"}),
+                    hide_index=True, **FULL_WIDTH,
+                )
+
+            def generar_informe_cliente_semana_pdf(df_g: pd.DataFrame, df_p: pd.DataFrame, alcance_texto: str) -> bytes:
+                from io import BytesIO
+
+                from reportlab.lib.pagesizes import letter
+                from reportlab.lib.units import cm
+                from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+                e = _pdf_estilos()
+                buf = BytesIO()
+                doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
+                                        leftMargin=1.5 * cm, rightMargin=1.5 * cm, title="Informe Semanal JE132")
+                encabezado = Table([
+                    ["INFORME SEMANAL — GASTOS Y PAGOS", f"Emitido: {datetime.now():%d-%m-%Y}"],
+                    ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", ""],
+                    [f"Alcance: {alcance_texto}", ""],
+                    ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
+                ], colWidths=[12.2 * cm, 6.4 * cm])
+                encabezado.setStyle(TableStyle([
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (0, 0), 13),
+                    ("FONTSIZE", (0, 1), (-1, -1), 9),
+                    ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                    ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ]))
+                elems = [encabezado, Spacer(1, 10)]
+
+                elems.append(Paragraph("Gastos", e["h2"]))
+                if df_g.empty:
+                    elems.append(Paragraph("Sin gastos registrados en este alcance.", e["normal"]))
+                else:
+                    filas_g = [["Fecha", "Monto", "Proveedor", "Descripción"]]
+                    for _, r in df_g.sort_values("fecha").iterrows():
+                        filas_g.append([_f_fecha(r["fecha"]), _dinero(float(r["monto"])),
+                                        Paragraph(str(r["proveedor"] or ""), e["chico"]),
+                                        Paragraph(str(r["descripcion"]), e["chico"])])
+                    filas_g.append(["", "", "TOTAL", _dinero(float(df_g["monto"].sum()))])
+                    t_g = Table(filas_g, colWidths=[2.6 * cm, 3 * cm, 5 * cm, 7.2 * cm], repeatRows=1)
+                    t_g.setStyle(e["tabla"])
+                    elems.append(t_g)
+
+                elems.append(Spacer(1, 10))
+                elems.append(Paragraph("Pagos", e["h2"]))
+                if df_p.empty:
+                    elems.append(Paragraph("Sin pagos registrados en este alcance.", e["normal"]))
+                else:
+                    filas_p = [["Fecha", "Concepto", "Monto"]]
+                    for _, r in df_p.sort_values("fecha").iterrows():
+                        filas_p.append([_f_fecha(r["fecha"]), Paragraph(str(r["concepto"]), e["chico"]),
+                                        _dinero(float(r["monto"]))])
+                    filas_p.append(["", "TOTAL", _dinero(float(df_p["monto"].sum()))])
+                    t_p = Table(filas_p, colWidths=[2.6 * cm, 10.2 * cm, 5 * cm], repeatRows=1)
+                    t_p.setStyle(e["tabla"])
+                    elems.append(t_p)
+
+                elems.append(Spacer(1, 10))
+                elems.append(Paragraph(f"Documento generado el {datetime.now():%d-%m-%Y %H:%M}.", e["chico"]))
+                doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+                return buf.getvalue()
+
+            try:
+                st.download_button(
+                    "📄 Descargar Informe Semanal (PDF)",
+                    generar_informe_cliente_semana_pdf(df_g_cli, df_p_cli, alcance_cli),
+                    file_name=f"informe_semanal_{alcance_cli.replace(' ', '_')}_JE132.pdf",
+                    mime="application/pdf",
+                    key="dl_informe_cliente_semana",
+                    **FULL_WIDTH,
+                )
+            except ImportError:
+                st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
+# ---------------------------------------------------------------
+# VISTA: INFORMES DE AVANCE DE OBRA (admin redacta, cliente consulta)
+# ---------------------------------------------------------------
+if PAGINA == "Informes":
+    st.markdown("---")
     seccion_informes_avance(puede_editar=ES_ADMIN)
 
 # ---------------------------------------------------------------
