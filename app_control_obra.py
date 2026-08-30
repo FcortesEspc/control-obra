@@ -3153,6 +3153,53 @@ if PAGINA == "Informes":
         doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
         return buf.getvalue()
 
+    def generar_informe_tipo_detalle_pdf(df_base: pd.DataFrame, alcance_texto: str) -> bytes:
+        """Versión simple para enseñar: solo Fecha, Monto, Proveedor y Descripción, sin desgloses."""
+        from io import BytesIO
+
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+        e = _pdf_estilos()
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
+                                leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                                title="Detalle de Gastos JE132")
+
+        encabezado = Table([
+            ["DETALLE DE GASTOS", f"Emitido: {datetime.now():%d-%m-%Y}"],
+            ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", ""],
+            [f"Alcance: {alcance_texto}", ""],
+            ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
+        ], colWidths=[12.2 * cm, 6.4 * cm])
+        encabezado.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (0, 0), 13),
+            ("FONTSIZE", (0, 1), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ]))
+        elems = [encabezado, Spacer(1, 10)]
+
+        df_ord = df_base.sort_values(["fecha", "id"])
+        filas = [["Fecha", "Monto", "Proveedor", "Descripción"]]
+        for _, r in df_ord.iterrows():
+            filas.append([
+                _f_fecha(r["fecha"]), _dinero(float(r["monto"])),
+                Paragraph(str(r["proveedor"] or ""), e["chico"]), Paragraph(str(r["descripcion"]), e["chico"]),
+            ])
+        total_det = float(df_base["monto"].sum())
+        filas.append(["", "", "TOTAL", _dinero(total_det)])
+        t = Table(filas, colWidths=[2.6 * cm, 3 * cm, 5 * cm, 7.2 * cm], repeatRows=1)
+        t.setStyle(e["tabla"])
+        elems.append(t)
+
+        elems.append(Spacer(1, 10))
+        elems.append(Paragraph(f"Documento generado el {datetime.now():%d-%m-%Y %H:%M}.", e["chico"]))
+        doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+        return buf.getvalue()
+
     st.markdown("---")
     with st.expander("🏷️ Informe por Tipo de Gasto"):
         st.caption("Compara cuánto se ha gastado en Materiales, Mano de Obra e Indirectos, "
@@ -3210,58 +3257,108 @@ if PAGINA == "Informes":
 
         elif alcance_modo == "Por semana de obra":
             semana_actual = _semana_de_fecha(datetime.now().date(), inicio_s1)
-            semana_num = st.number_input(
-                "Número de semana:", min_value=1, step=1,
-                value=max(1, semana_actual), key="tp_semana_num",
+            csem1, csem2 = st.columns(2)
+            semana_desde = csem1.number_input(
+                "Semana desde:", min_value=1, step=1,
+                value=max(1, semana_actual), key="tp_semana_desde",
             )
-            ini_sem, fin_sem = _rango_semana(int(semana_num), inicio_s1)
-            st.caption(f"**Semana {int(semana_num)}**: lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)}.")
-            df_reporte_tipo = df_gastos[(df_gastos["fecha"] >= ini_sem.isoformat())
-                                        & (df_gastos["fecha"] <= fin_sem.isoformat())]
-            alcance_texto = f"Semana {int(semana_num)} (lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)})"
-            sufijo_archivo = f"semana_{int(semana_num):02d}"
+            semana_hasta = csem2.number_input(
+                "Semana hasta:", min_value=1, step=1,
+                value=int(semana_desde), key="tp_semana_hasta",
+            )
+            if semana_hasta < semana_desde:
+                st.error("La semana final no puede ser anterior a la semana inicial.")
+                df_reporte_tipo = df_gastos.iloc[0:0]
+                alcance_texto = "Rango de semanas inválido"
+                sufijo_archivo = "rango_semanas_invalido"
+            else:
+                ini_sem, _ = _rango_semana(int(semana_desde), inicio_s1)
+                _, fin_sem = _rango_semana(int(semana_hasta), inicio_s1)
+                if int(semana_desde) == int(semana_hasta):
+                    st.caption(f"**Semana {int(semana_desde)}**: lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)}.")
+                    alcance_texto = f"Semana {int(semana_desde)} (lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)})"
+                    sufijo_archivo = f"semana_{int(semana_desde):02d}"
+                else:
+                    st.caption(f"**Semana {int(semana_desde)} a Semana {int(semana_hasta)}**: "
+                               f"lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)}.")
+                    alcance_texto = (f"Semana {int(semana_desde)} a Semana {int(semana_hasta)} "
+                                    f"(lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)})")
+                    sufijo_archivo = f"semana_{int(semana_desde):02d}_a_{int(semana_hasta):02d}"
+                df_reporte_tipo = df_gastos[(df_gastos["fecha"] >= ini_sem.isoformat())
+                                            & (df_gastos["fecha"] <= fin_sem.isoformat())]
 
         total_reporte_tipo = float(df_reporte_tipo["monto"].sum())
 
-        df_tot_tipo = (
-            df_reporte_tipo.groupby("tipo")["monto"].sum().reindex(TIPOS_REPORTE).fillna(0.0)
-        )
-        mt1, mt2, mt3 = st.columns(3)
-        for col, tipo in zip((mt1, mt2, mt3), TIPOS_REPORTE):
-            monto_t = float(df_tot_tipo.loc[tipo])
-            pct_t = (monto_t / total_reporte_tipo * 100) if total_reporte_tipo else 0
-            col.metric(tipo, f"${monto_t:,.2f}", f"{pct_t:.0f}% del alcance", delta_color="off")
+        vista_modo = st.radio("Vista:", ["Resumen", "Detalle"], horizontal=True, key="tipo_reporte_vista")
 
-        if total_reporte_tipo > 0:
-            st.bar_chart(df_tot_tipo, **FULL_WIDTH)
-        else:
-            st.info("Sin movimientos registrados en este alcance.")
-
-        tipo_sel = st.selectbox("Ver detalle de:", TIPOS_REPORTE, key="tipo_reporte_sel")
-        df_t_sel = df_reporte_tipo[df_reporte_tipo["tipo"] == tipo_sel].sort_values(["fecha", "id"], ascending=False)
-        if df_t_sel.empty:
-            st.info(f"Sin movimientos registrados en '{tipo_sel}' dentro de este alcance.")
-        else:
-            df_t_vista = df_t_sel[["id", "fecha", "fase", "proveedor", "descripcion", "monto"]].copy()
-            df_t_vista["fecha"] = df_t_vista["fecha"].map(_f_fecha)
-            st.dataframe(
-                df_t_vista.rename(columns={"id": "Folio", "fecha": "Fecha", "fase": "Fase",
-                                           "proveedor": "Proveedor", "descripcion": "Descripción", "monto": "Monto"})
-                .style.format({"Monto": "${:,.2f}"}),
-                hide_index=True, **FULL_WIDTH,
+        if vista_modo == "Resumen":
+            df_tot_tipo = (
+                df_reporte_tipo.groupby("tipo")["monto"].sum().reindex(TIPOS_REPORTE).fillna(0.0)
             )
+            mt1, mt2, mt3 = st.columns(3)
+            for col, tipo in zip((mt1, mt2, mt3), TIPOS_REPORTE):
+                monto_t = float(df_tot_tipo.loc[tipo])
+                pct_t = (monto_t / total_reporte_tipo * 100) if total_reporte_tipo else 0
+                col.metric(tipo, f"${monto_t:,.2f}", f"{pct_t:.0f}% del alcance", delta_color="off")
 
-        try:
-            st.download_button(
-                "📄 Descargar Informe por Tipo de Gasto (PDF)",
-                generar_informe_tipo_pdf(df_reporte_tipo, alcance_texto),
-                file_name=f"informe_por_tipo_{sufijo_archivo}_JE132.pdf",
-                mime="application/pdf",
-                key="dl_informe_tipo",
-                **FULL_WIDTH,
-            )
-        except ImportError:
-            st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+            if total_reporte_tipo > 0:
+                st.bar_chart(df_tot_tipo, **FULL_WIDTH)
+            else:
+                st.info("Sin movimientos registrados en este alcance.")
+
+            tipo_sel = st.selectbox("Ver detalle de:", TIPOS_REPORTE, key="tipo_reporte_sel")
+            df_t_sel = df_reporte_tipo[df_reporte_tipo["tipo"] == tipo_sel].sort_values(["fecha", "id"], ascending=False)
+            if df_t_sel.empty:
+                st.info(f"Sin movimientos registrados en '{tipo_sel}' dentro de este alcance.")
+            else:
+                df_t_vista = df_t_sel[["id", "fecha", "fase", "proveedor", "descripcion", "monto"]].copy()
+                df_t_vista["fecha"] = df_t_vista["fecha"].map(_f_fecha)
+                st.dataframe(
+                    df_t_vista.rename(columns={"id": "Folio", "fecha": "Fecha", "fase": "Fase",
+                                               "proveedor": "Proveedor", "descripcion": "Descripción", "monto": "Monto"})
+                    .style.format({"Monto": "${:,.2f}"}),
+                    hide_index=True, **FULL_WIDTH,
+                )
+
+            try:
+                st.download_button(
+                    "📄 Descargar Informe por Tipo de Gasto (PDF)",
+                    generar_informe_tipo_pdf(df_reporte_tipo, alcance_texto),
+                    file_name=f"informe_por_tipo_{sufijo_archivo}_resumen_JE132.pdf",
+                    mime="application/pdf",
+                    key="dl_informe_tipo",
+                    **FULL_WIDTH,
+                )
+            except ImportError:
+                st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
+        else:  # vista_modo == "Detalle"
+            st.caption("Lista simple: fecha, monto, proveedor y descripción — sin desgloses por tipo o fase.")
+            if df_reporte_tipo.empty:
+                st.info("Sin movimientos registrados en este alcance.")
+            else:
+                df_det_vista = df_reporte_tipo[["fecha", "monto", "proveedor", "descripcion"]].copy()
+                df_det_vista = df_det_vista.sort_values("fecha", ascending=False)
+                df_det_vista["fecha"] = df_det_vista["fecha"].map(_f_fecha)
+                st.dataframe(
+                    df_det_vista.rename(columns={"fecha": "Fecha", "monto": "Monto",
+                                                 "proveedor": "Proveedor", "descripcion": "Descripción"})
+                    .style.format({"Monto": "${:,.2f}"}),
+                    hide_index=True, **FULL_WIDTH,
+                )
+                st.caption(f"**Total del alcance: ${total_reporte_tipo:,.2f}** ({len(df_reporte_tipo)} movimiento(s)).")
+
+            try:
+                st.download_button(
+                    "📄 Descargar Detalle (PDF)",
+                    generar_informe_tipo_detalle_pdf(df_reporte_tipo, alcance_texto),
+                    file_name=f"informe_por_tipo_{sufijo_archivo}_detalle_JE132.pdf",
+                    mime="application/pdf",
+                    key="dl_informe_tipo_detalle",
+                    **FULL_WIDTH,
+                )
+            except ImportError:
+                st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
 
     # --- Informe por periodo (estado de cuenta con corte de fechas) ---
     def _corte_periodo(desde: str, hasta: str) -> dict:
