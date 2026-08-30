@@ -3006,6 +3006,145 @@ if PAGINA == "Informes":
             st.error("Falta la librería openpyxl. Agrega 'openpyxl' al requirements.txt.")
 
 
+    # --- Informe por tipo de gasto (Materiales / Mano de Obra / Gastos Indirectos) ---
+    TIPOS_REPORTE = TIPOS_DIRECTOS + [FASE_INDIRECTOS]
+
+    def generar_informe_tipo_pdf() -> bytes:
+        """Informe por tipo de gasto: total y % de cada tipo, desglose por fase,
+        principales proveedores y detalle de movimientos."""
+        from io import BytesIO
+
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.units import cm
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+        e = _pdf_estilos()
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
+                                leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+                                title="Informe por Tipo de Gasto JE132")
+
+        encabezado = Table([
+            ["INFORME POR TIPO DE GASTO", f"Emitido: {datetime.now():%d-%m-%Y}"],
+            ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", ""],
+            ["Cliente: José Manuel Robles Miguel", ""],
+            ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
+        ], colWidths=[12.2 * cm, 6.4 * cm])
+        encabezado.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (0, 0), 13),
+            ("FONTSIZE", (0, 1), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ]))
+        elems = [encabezado, Spacer(1, 8)]
+
+        # 1. Resumen: total y % de cada tipo
+        elems.append(Paragraph("1. Resumen por Tipo de Gasto", e["h2"]))
+        filas_res = [["Tipo de Gasto", "Monto", "% del Gasto Total"]]
+        for tipo in TIPOS_REPORTE:
+            monto_t = float(df_gastos.loc[df_gastos["tipo"] == tipo, "monto"].sum())
+            pct_t = (monto_t / total_real * 100) if total_real else 0
+            filas_res.append([tipo, _dinero(monto_t), f"{pct_t:.1f}%"])
+        filas_res.append(["TOTAL", _dinero(total_real), "100.0%"])
+        t_res = Table(filas_res, colWidths=[8 * cm, 5 * cm, 5 * cm])
+        t_res.setStyle(e["tabla"])
+        elems.append(t_res)
+
+        # 2. Una sección detallada por cada tipo
+        for n, tipo in enumerate(TIPOS_REPORTE, start=2):
+            df_t = df_gastos[df_gastos["tipo"] == tipo]
+            monto_t = float(df_t["monto"].sum())
+            elems.append(Paragraph(f"{n}. Detalle: {tipo}", e["h2"]))
+            if df_t.empty:
+                elems.append(Paragraph("Sin movimientos registrados en este tipo.", e["normal"]))
+                continue
+
+            elems.append(Paragraph(f"Total: {_dinero(monto_t)} — {len(df_t)} movimiento(s)", e["normal"]))
+            elems.append(Spacer(1, 4))
+
+            # Desglose por fase
+            filas_fase = [["Fase", "Monto"]]
+            for fase, m in df_t.groupby("fase")["monto"].sum().sort_values(ascending=False).items():
+                filas_fase.append([Paragraph(str(fase), e["chico"]), _dinero(float(m))])
+            t_fase = Table(filas_fase, colWidths=[13 * cm, 5 * cm])
+            t_fase.setStyle(e["tabla"])
+            elems.append(t_fase)
+            elems.append(Spacer(1, 4))
+
+            # Principales proveedores/beneficiarios
+            df_prov = df_t[df_t["proveedor"].notna() & (df_t["proveedor"] != "")]
+            if not df_prov.empty:
+                top_prov = df_prov.groupby("proveedor")["monto"].sum().sort_values(ascending=False).head(8)
+                filas_p = [["Proveedor / Beneficiario", "Monto"]]
+                for prov, m in top_prov.items():
+                    filas_p.append([Paragraph(str(prov), e["chico"]), _dinero(float(m))])
+                t_prov = Table(filas_p, colWidths=[13 * cm, 5 * cm])
+                t_prov.setStyle(e["tabla"])
+                elems.append(t_prov)
+                elems.append(Spacer(1, 4))
+
+            # Detalle de movimientos
+            filas_det = [["Folio", "Fecha", "Fase", "Monto", "Proveedor", "Descripción"]]
+            for _, r in df_t.sort_values(["fecha", "id"]).iterrows():
+                filas_det.append([
+                    str(r["id"]), _f_fecha(r["fecha"]), Paragraph(str(r["fase"]).split(":")[0], e["chico"]),
+                    _dinero(float(r["monto"])), Paragraph(str(r["proveedor"] or ""), e["chico"]),
+                    Paragraph(str(r["descripcion"]), e["chico"]),
+                ])
+            t_det = Table(filas_det, colWidths=[1.3 * cm, 2.2 * cm, 2.3 * cm, 2.6 * cm, 3.8 * cm, 5.8 * cm],
+                         repeatRows=1)
+            t_det.setStyle(e["tabla"])
+            elems.append(t_det)
+
+        elems.append(Spacer(1, 10))
+        elems.append(Paragraph(f"Documento generado el {datetime.now():%d-%m-%Y %H:%M}.", e["chico"]))
+        doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+        return buf.getvalue()
+
+    st.markdown("---")
+    with st.expander("🏷️ Informe por Tipo de Gasto"):
+        st.caption("Compara cuánto se ha gastado en Materiales, Mano de Obra e Indirectos, "
+                   "con el desglose por fase y proveedor de cada uno.")
+
+        df_tot_tipo = (
+            df_gastos.groupby("tipo")["monto"].sum().reindex(TIPOS_REPORTE).fillna(0.0)
+        )
+        mt1, mt2, mt3 = st.columns(3)
+        for col, tipo in zip((mt1, mt2, mt3), TIPOS_REPORTE):
+            monto_t = float(df_tot_tipo.loc[tipo])
+            pct_t = (monto_t / total_real * 100) if total_real else 0
+            col.metric(tipo, f"${monto_t:,.2f}", f"{pct_t:.0f}% del gasto", delta_color="off")
+
+        if total_real > 0:
+            st.bar_chart(df_tot_tipo, **FULL_WIDTH)
+
+        tipo_sel = st.selectbox("Ver detalle de:", TIPOS_REPORTE, key="tipo_reporte_sel")
+        df_t_sel = df_gastos[df_gastos["tipo"] == tipo_sel].sort_values(["fecha", "id"], ascending=False)
+        if df_t_sel.empty:
+            st.info(f"Sin movimientos registrados en '{tipo_sel}'.")
+        else:
+            df_t_vista = df_t_sel[["id", "fecha", "fase", "proveedor", "descripcion", "monto"]].copy()
+            df_t_vista["fecha"] = df_t_vista["fecha"].map(_f_fecha)
+            st.dataframe(
+                df_t_vista.rename(columns={"id": "Folio", "fecha": "Fecha", "fase": "Fase",
+                                           "proveedor": "Proveedor", "descripcion": "Descripción", "monto": "Monto"})
+                .style.format({"Monto": "${:,.2f}"}),
+                hide_index=True, **FULL_WIDTH,
+            )
+
+        try:
+            st.download_button(
+                "📄 Descargar Informe por Tipo de Gasto (PDF)",
+                generar_informe_tipo_pdf(),
+                file_name=f"informe_por_tipo_JE132_{fecha_archivo}.pdf",
+                mime="application/pdf",
+                key="dl_informe_tipo",
+                **FULL_WIDTH,
+            )
+        except ImportError:
+            st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
     # --- Informe por periodo (estado de cuenta con corte de fechas) ---
     def _corte_periodo(desde: str, hasta: str) -> dict:
         """Corte financiero: acumulado anterior al periodo, movimientos del periodo y saldo final."""
