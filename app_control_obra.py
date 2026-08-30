@@ -356,6 +356,10 @@ def init_db() -> None:
                 proveedor TEXT,
                 descripcion TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS configuracion (
+                clave TEXT PRIMARY KEY,
+                valor TEXT
+            );
             CREATE TABLE IF NOT EXISTS pagos_cliente (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 fecha TEXT NOT NULL,
@@ -473,6 +477,45 @@ def leer_pagos() -> pd.DataFrame:
         return pd.read_sql_query(
             "SELECT id, fecha, concepto, monto FROM pagos_cliente ORDER BY fecha DESC, id DESC", conn
         )
+
+
+def leer_config(clave: str, default: str | None = None) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT valor FROM configuracion WHERE clave = ?", (clave,)).fetchone()
+    return row[0] if row else default
+
+
+def guardar_config(clave: str, valor: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO configuracion (clave, valor) VALUES (?, ?) "
+            "ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor",
+            (clave, valor),
+        )
+
+
+def _lunes_de(fecha) -> "date":
+    d = pd.to_datetime(fecha).date()
+    return d - pd.Timedelta(days=d.weekday())
+
+
+def _inicio_semana1():
+    """Fecha (lunes) en que arranca la Semana 1 de la obra, o None si no se ha configurado."""
+    val = leer_config("inicio_semana_1")
+    if not val:
+        return None
+    return pd.to_datetime(val).date()
+
+
+def _rango_semana(numero: int, inicio_s1) -> tuple:
+    inicio = inicio_s1 + pd.Timedelta(days=7 * (numero - 1))
+    fin = inicio + pd.Timedelta(days=6)
+    return inicio, fin
+
+
+def _semana_de_fecha(fecha, inicio_s1) -> int:
+    d = pd.to_datetime(fecha).date()
+    return (d - inicio_s1).days // 7 + 1
 
 
 def leer_avance_fisico() -> dict:
@@ -3009,9 +3052,11 @@ if PAGINA == "Informes":
     # --- Informe por tipo de gasto (Materiales / Mano de Obra / Gastos Indirectos) ---
     TIPOS_REPORTE = TIPOS_DIRECTOS + [FASE_INDIRECTOS]
 
-    def generar_informe_tipo_pdf() -> bytes:
+    def generar_informe_tipo_pdf(df_base: pd.DataFrame, alcance_texto: str) -> bytes:
         """Informe por tipo de gasto: total y % de cada tipo, desglose por fase,
-        principales proveedores y detalle de movimientos."""
+        principales proveedores y detalle de movimientos. df_base ya viene filtrado
+        (acumulado, por periodo o por semana); los porcentajes se calculan contra
+        el total de ese subconjunto."""
         from io import BytesIO
 
         from reportlab.lib.pagesizes import letter
@@ -3019,6 +3064,7 @@ if PAGINA == "Informes":
         from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
         e = _pdf_estilos()
+        total_base = float(df_base["monto"].sum())
         buf = BytesIO()
         doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
                                 leftMargin=1.5 * cm, rightMargin=1.5 * cm,
@@ -3027,33 +3073,38 @@ if PAGINA == "Informes":
         encabezado = Table([
             ["INFORME POR TIPO DE GASTO", f"Emitido: {datetime.now():%d-%m-%Y}"],
             ["Obra: Construcción Vivienda Familiar Tres Niveles (JE132)", ""],
-            ["Cliente: José Manuel Robles Miguel", ""],
+            [f"Alcance: {alcance_texto}", ""],
             ["Contratistas: DACAM & HOGAR 911 | control.hogar911.com", ""],
         ], colWidths=[12.2 * cm, 6.4 * cm])
         encabezado.setStyle(TableStyle([
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
             ("FONTSIZE", (0, 0), (0, 0), 13),
+            ("FONTNAME", (0, 2), (0, 2), "Helvetica-Bold"),
             ("FONTSIZE", (0, 1), (-1, -1), 9),
             ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
             ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ]))
         elems = [encabezado, Spacer(1, 8)]
 
-        # 1. Resumen: total y % de cada tipo
+        # 1. Resumen: total y % de cada tipo (dentro del alcance elegido)
         elems.append(Paragraph("1. Resumen por Tipo de Gasto", e["h2"]))
-        filas_res = [["Tipo de Gasto", "Monto", "% del Gasto Total"]]
+        filas_res = [["Tipo de Gasto", "Monto", "% del Total del Alcance"]]
         for tipo in TIPOS_REPORTE:
-            monto_t = float(df_gastos.loc[df_gastos["tipo"] == tipo, "monto"].sum())
-            pct_t = (monto_t / total_real * 100) if total_real else 0
+            monto_t = float(df_base.loc[df_base["tipo"] == tipo, "monto"].sum())
+            pct_t = (monto_t / total_base * 100) if total_base else 0
             filas_res.append([tipo, _dinero(monto_t), f"{pct_t:.1f}%"])
-        filas_res.append(["TOTAL", _dinero(total_real), "100.0%"])
+        filas_res.append(["TOTAL", _dinero(total_base), "100.0%"])
         t_res = Table(filas_res, colWidths=[8 * cm, 5 * cm, 5 * cm])
         t_res.setStyle(e["tabla"])
         elems.append(t_res)
 
+        if df_base.empty:
+            elems.append(Spacer(1, 8))
+            elems.append(Paragraph("Sin movimientos registrados en este alcance.", e["normal"]))
+
         # 2. Una sección detallada por cada tipo
         for n, tipo in enumerate(TIPOS_REPORTE, start=2):
-            df_t = df_gastos[df_gastos["tipo"] == tipo]
+            df_t = df_base[df_base["tipo"] == tipo]
             monto_t = float(df_t["monto"].sum())
             elems.append(Paragraph(f"{n}. Detalle: {tipo}", e["h2"]))
             if df_t.empty:
@@ -3105,24 +3156,91 @@ if PAGINA == "Informes":
     st.markdown("---")
     with st.expander("🏷️ Informe por Tipo de Gasto"):
         st.caption("Compara cuánto se ha gastado en Materiales, Mano de Obra e Indirectos, "
-                   "con el desglose por fase y proveedor de cada uno.")
+                   "con el desglose por fase y proveedor de cada uno. Puedes verlo acumulado, "
+                   "en un rango de fechas, o por semana de obra.")
+
+        # --- Configuración de la Semana 1 (lunes a domingo, consecutivas) ---
+        inicio_s1 = _inicio_semana1()
+        with st.expander("⚙️ Configurar inicio de la Semana 1 de la obra", expanded=inicio_s1 is None):
+            if st.session_state.pop("msg_semana1_ok", None):
+                st.success("Fecha de inicio de la Semana 1 guardada.")
+            valor_actual = inicio_s1 or datetime.now().date()
+            fecha_s1_input = st.date_input(
+                "Cualquier fecha dentro de la primera semana de obra:",
+                value=valor_actual, format="DD-MM-YYYY", key="fecha_inicio_s1",
+            )
+            lunes_calc = _lunes_de(fecha_s1_input)
+            domingo_calc = lunes_calc + pd.Timedelta(days=6)
+            st.caption(f"La Semana 1 quedaría del **lunes {_f_fecha(lunes_calc)}** "
+                       f"al **domingo {_f_fecha(domingo_calc)}**. Las semanas siguientes se "
+                       "numeran consecutivas de lunes a domingo a partir de esa fecha.")
+            if st.button("💾 Guardar inicio de Semana 1", key="btn_guardar_s1"):
+                guardar_config("inicio_semana_1", lunes_calc.isoformat())
+                st.session_state["msg_semana1_ok"] = True
+                st.rerun()
+
+        inicio_s1 = _inicio_semana1()  # releer por si se acaba de guardar
+
+        # --- Selector de alcance del reporte ---
+        opciones_alcance = ["Todo el proyecto (acumulado)", "Por periodo (rango de fechas)"]
+        if inicio_s1:
+            opciones_alcance.append("Por semana de obra")
+        alcance_modo = st.radio("Alcance del reporte:", opciones_alcance, horizontal=True, key="alcance_tipo_gasto")
+
+        df_reporte_tipo = df_gastos
+        alcance_texto = "Acumulado a la fecha"
+        sufijo_archivo = "acumulado"
+
+        if alcance_modo == "Por periodo (rango de fechas)":
+            cper1, cper2 = st.columns(2)
+            desde_tp = cper1.date_input("Desde:", value=(datetime.now() - pd.Timedelta(days=6)).date(),
+                                        format="DD-MM-YYYY", key="tp_desde")
+            hasta_tp = cper2.date_input("Hasta:", value=datetime.now().date(),
+                                        format="DD-MM-YYYY", key="tp_hasta")
+            if desde_tp > hasta_tp:
+                st.error("La fecha inicial no puede ser posterior a la final.")
+                df_reporte_tipo = df_gastos.iloc[0:0]
+                alcance_texto = "Rango de fechas inválido"
+                sufijo_archivo = "rango_invalido"
+            else:
+                df_reporte_tipo = df_gastos[(df_gastos["fecha"] >= desde_tp.isoformat())
+                                            & (df_gastos["fecha"] <= hasta_tp.isoformat())]
+                alcance_texto = f"Del {_f_fecha(desde_tp)} al {_f_fecha(hasta_tp)}"
+                sufijo_archivo = f"periodo_{desde_tp.isoformat()}_a_{hasta_tp.isoformat()}"
+
+        elif alcance_modo == "Por semana de obra":
+            semana_actual = _semana_de_fecha(datetime.now().date(), inicio_s1)
+            semana_num = st.number_input(
+                "Número de semana:", min_value=1, step=1,
+                value=max(1, semana_actual), key="tp_semana_num",
+            )
+            ini_sem, fin_sem = _rango_semana(int(semana_num), inicio_s1)
+            st.caption(f"**Semana {int(semana_num)}**: lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)}.")
+            df_reporte_tipo = df_gastos[(df_gastos["fecha"] >= ini_sem.isoformat())
+                                        & (df_gastos["fecha"] <= fin_sem.isoformat())]
+            alcance_texto = f"Semana {int(semana_num)} (lunes {_f_fecha(ini_sem)} a domingo {_f_fecha(fin_sem)})"
+            sufijo_archivo = f"semana_{int(semana_num):02d}"
+
+        total_reporte_tipo = float(df_reporte_tipo["monto"].sum())
 
         df_tot_tipo = (
-            df_gastos.groupby("tipo")["monto"].sum().reindex(TIPOS_REPORTE).fillna(0.0)
+            df_reporte_tipo.groupby("tipo")["monto"].sum().reindex(TIPOS_REPORTE).fillna(0.0)
         )
         mt1, mt2, mt3 = st.columns(3)
         for col, tipo in zip((mt1, mt2, mt3), TIPOS_REPORTE):
             monto_t = float(df_tot_tipo.loc[tipo])
-            pct_t = (monto_t / total_real * 100) if total_real else 0
-            col.metric(tipo, f"${monto_t:,.2f}", f"{pct_t:.0f}% del gasto", delta_color="off")
+            pct_t = (monto_t / total_reporte_tipo * 100) if total_reporte_tipo else 0
+            col.metric(tipo, f"${monto_t:,.2f}", f"{pct_t:.0f}% del alcance", delta_color="off")
 
-        if total_real > 0:
+        if total_reporte_tipo > 0:
             st.bar_chart(df_tot_tipo, **FULL_WIDTH)
+        else:
+            st.info("Sin movimientos registrados en este alcance.")
 
         tipo_sel = st.selectbox("Ver detalle de:", TIPOS_REPORTE, key="tipo_reporte_sel")
-        df_t_sel = df_gastos[df_gastos["tipo"] == tipo_sel].sort_values(["fecha", "id"], ascending=False)
+        df_t_sel = df_reporte_tipo[df_reporte_tipo["tipo"] == tipo_sel].sort_values(["fecha", "id"], ascending=False)
         if df_t_sel.empty:
-            st.info(f"Sin movimientos registrados en '{tipo_sel}'.")
+            st.info(f"Sin movimientos registrados en '{tipo_sel}' dentro de este alcance.")
         else:
             df_t_vista = df_t_sel[["id", "fecha", "fase", "proveedor", "descripcion", "monto"]].copy()
             df_t_vista["fecha"] = df_t_vista["fecha"].map(_f_fecha)
@@ -3136,8 +3254,8 @@ if PAGINA == "Informes":
         try:
             st.download_button(
                 "📄 Descargar Informe por Tipo de Gasto (PDF)",
-                generar_informe_tipo_pdf(),
-                file_name=f"informe_por_tipo_JE132_{fecha_archivo}.pdf",
+                generar_informe_tipo_pdf(df_reporte_tipo, alcance_texto),
+                file_name=f"informe_por_tipo_{sufijo_archivo}_JE132.pdf",
                 mime="application/pdf",
                 key="dl_informe_tipo",
                 **FULL_WIDTH,
