@@ -990,13 +990,46 @@ pagina_iconos = {
     "Informes": "□",
     "Administración": "⚙",
 }
-PAGINA = st.sidebar.radio(
+
+# Estado canónico de navegación, compartido entre el selector del contenido
+# principal (visible siempre, clave en celular) y el radio del sidebar (desktop).
+if "pagina_actual" not in st.session_state or st.session_state["pagina_actual"] not in paginas:
+    st.session_state["pagina_actual"] = paginas[0]
+
+
+def _nav_main_changed():
+    st.session_state["pagina_actual"] = st.session_state["nav_main_mobile"]
+
+
+def _nav_sidebar_changed():
+    st.session_state["pagina_actual"] = st.session_state["nav_principal_v42"]
+
+
+# Antes de instanciar los widgets, ambos reflejan el valor canónico vigente
+# (incluye el caso en que el otro widget lo acaba de cambiar).
+st.session_state["nav_main_mobile"] = st.session_state["pagina_actual"]
+st.session_state["nav_principal_v42"] = st.session_state["pagina_actual"]
+
+st.selectbox(
+    "Navegación",
+    paginas,
+    format_func=lambda x: f"{pagina_iconos.get(x, '•')}  {x}",
+    key="nav_main_mobile",
+    on_change=_nav_main_changed,
+    label_visibility="collapsed",
+)
+st.caption("👆 Menú de navegación — también disponible en el panel lateral en pantallas grandes.")
+
+st.sidebar.radio(
     "Navegación",
     paginas,
     format_func=lambda x: f"{pagina_iconos.get(x, '•')}  {x}",
     key="nav_principal_v42",
+    on_change=_nav_sidebar_changed,
     label_visibility="collapsed",
 )
+
+PAGINA = st.session_state["pagina_actual"]
 
 if (os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
         or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")):
