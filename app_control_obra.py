@@ -3588,6 +3588,7 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
             _, fin_sem_cli = _rango_semana(int(semana_hasta_cli), inicio_s1_cli)
             alcance_cli = (f"Semana {int(semana_desde_cli)}" if semana_desde_cli == semana_hasta_cli
                           else f"Semana {int(semana_desde_cli)} a Semana {int(semana_hasta_cli)}")
+            alcance_cli_fechas = f"{alcance_cli} (lunes {_f_fecha(ini_sem_cli)} a domingo {_f_fecha(fin_sem_cli)})"
             st.caption(f"**{alcance_cli}**: lunes {_f_fecha(ini_sem_cli)} a domingo {_f_fecha(fin_sem_cli)}.")
 
             df_g_cli = df_gastos[(df_gastos["fecha"] >= ini_sem_cli.isoformat())
@@ -3600,17 +3601,20 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
             # Acumulado antes de esta semana (todo lo anterior al inicio del alcance elegido)
             gastos_acum_cli = float(df_gastos[df_gastos["fecha"] < ini_sem_cli.isoformat()]["monto"].sum())
             pagos_acum_cli = float(df_pagos[df_pagos["fecha"] < ini_sem_cli.isoformat()]["monto"].sum())
-            etiqueta_acum = (f"Semana {int(semana_desde_cli) - 1}" if semana_desde_cli > 1
-                             else "antes de la Semana 1")
+            if semana_desde_cli > 1:
+                _, fin_sem_prev_cli = _rango_semana(int(semana_desde_cli) - 1, inicio_s1_cli)
+                etiqueta_acum = f"Semana {int(semana_desde_cli) - 1} (al {_f_fecha(fin_sem_prev_cli)})"
+            else:
+                etiqueta_acum = "antes de la Semana 1"
 
             # Total general = acumulado anterior + lo de la semana (o semanas) en consulta
             gastos_total_cli = gastos_acum_cli + total_g_cli
             pagos_total_cli = pagos_acum_cli + total_p_cli
-            etiqueta_total = f"Total acumulado a la Semana {int(semana_hasta_cli)}"
+            etiqueta_total = f"Total acumulado a la Semana {int(semana_hasta_cli)} (al {_f_fecha(fin_sem_cli)})"
 
             st.markdown("##### 📊 Resumen")
             df_resumen_cli = pd.DataFrame({
-                "Concepto": [f"Acumulado {etiqueta_acum}", f"Total de {alcance_cli}", etiqueta_total],
+                "Concepto": [f"Acumulado {etiqueta_acum}", f"Total de {alcance_cli_fechas}", etiqueta_total],
                 "Gastos": [gastos_acum_cli, total_g_cli, gastos_total_cli],
                 "Pagos": [pagos_acum_cli, total_p_cli, pagos_total_cli],
             })
@@ -3676,9 +3680,10 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
                 elems.append(Paragraph("Resumen", e["h2"]))
                 filas_res = [
                     ["Concepto", "Gastos", "Pagos"],
-                    [f"Acumulado {etiqueta_acum}", _dinero(gastos_acum), _dinero(pagos_acum)],
-                    [f"Total de {alcance_texto}", _dinero(float(df_g['monto'].sum())), _dinero(float(df_p['monto'].sum()))],
-                    [etiqueta_total, _dinero(gastos_total), _dinero(pagos_total)],
+                    [Paragraph(f"Acumulado {etiqueta_acum}", e["chico"]), _dinero(gastos_acum), _dinero(pagos_acum)],
+                    [Paragraph(f"Total de {alcance_texto}", e["chico"]),
+                     _dinero(float(df_g['monto'].sum())), _dinero(float(df_p['monto'].sum()))],
+                    [Paragraph(etiqueta_total, e["chico"]), _dinero(gastos_total), _dinero(pagos_total)],
                 ]
                 t_res = Table(filas_res, colWidths=[7.2 * cm, 5.5 * cm, 5.5 * cm])
                 t_res.setStyle(e["tabla"])
@@ -3722,7 +3727,7 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
                 st.download_button(
                     "📄 Descargar Informe Semanal (PDF)",
                     generar_informe_cliente_semana_pdf(
-                        df_g_cli, df_p_cli, alcance_cli,
+                        df_g_cli, df_p_cli, alcance_cli_fechas,
                         gastos_acum_cli, pagos_acum_cli, etiqueta_acum,
                         gastos_total_cli, pagos_total_cli, etiqueta_total,
                     ),
