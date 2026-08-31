@@ -3597,6 +3597,35 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
             total_g_cli = float(df_g_cli["monto"].sum())
             total_p_cli = float(df_p_cli["monto"].sum())
 
+            # Acumulado antes de esta semana (todo lo anterior al inicio del alcance elegido)
+            gastos_acum_cli = float(df_gastos[df_gastos["fecha"] < ini_sem_cli.isoformat()]["monto"].sum())
+            pagos_acum_cli = float(df_pagos[df_pagos["fecha"] < ini_sem_cli.isoformat()]["monto"].sum())
+            etiqueta_acum = (f"Semana {int(semana_desde_cli) - 1}" if semana_desde_cli > 1
+                             else "antes de la Semana 1")
+
+            # Total del mes calendario en que cae el inicio de la semana seleccionada
+            _MESES_ES = {1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
+                        7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"}
+            import calendar as _calendar
+            mes_ini_cli = ini_sem_cli.replace(day=1)
+            mes_fin_cli = ini_sem_cli.replace(day=_calendar.monthrange(ini_sem_cli.year, ini_sem_cli.month)[1])
+            nombre_mes_cli = f"{_MESES_ES[mes_ini_cli.month]} {mes_ini_cli.year}"
+            gastos_mes_cli = float(df_gastos[(df_gastos["fecha"] >= mes_ini_cli.isoformat())
+                                             & (df_gastos["fecha"] <= mes_fin_cli.isoformat())]["monto"].sum())
+            pagos_mes_cli = float(df_pagos[(df_pagos["fecha"] >= mes_ini_cli.isoformat())
+                                           & (df_pagos["fecha"] <= mes_fin_cli.isoformat())]["monto"].sum())
+
+            st.markdown(f"##### 📊 Acumulado {etiqueta_acum}")
+            ma1, ma2 = st.columns(2)
+            ma1.metric("Gastos acumulados", f"${gastos_acum_cli:,.2f}")
+            ma2.metric("Pagos acumulados", f"${pagos_acum_cli:,.2f}")
+
+            st.markdown(f"##### 🗓️ Total de {nombre_mes_cli}")
+            mm1, mm2 = st.columns(2)
+            mm1.metric("Gastos del mes", f"${gastos_mes_cli:,.2f}")
+            mm2.metric("Pagos del mes", f"${pagos_mes_cli:,.2f}")
+
+            st.markdown(f"##### 📆 Total de {alcance_cli}")
             mc1, mc2, mc3 = st.columns(3)
             mc1.metric("Gastos de la semana", f"${total_g_cli:,.2f}")
             mc2.metric("Pagos de la semana", f"${total_p_cli:,.2f}")
@@ -3628,7 +3657,9 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
                     hide_index=True, **FULL_WIDTH,
                 )
 
-            def generar_informe_cliente_semana_pdf(df_g: pd.DataFrame, df_p: pd.DataFrame, alcance_texto: str) -> bytes:
+            def generar_informe_cliente_semana_pdf(df_g: pd.DataFrame, df_p: pd.DataFrame, alcance_texto: str,
+                                                    gastos_acum: float, pagos_acum: float, etiqueta_acum: str,
+                                                    gastos_mes: float, pagos_mes: float, nombre_mes: str) -> bytes:
                 from io import BytesIO
 
                 from reportlab.lib.pagesizes import letter
@@ -3653,6 +3684,18 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
                     ("ALIGN", (1, 0), (1, -1), "RIGHT"),
                 ]))
                 elems = [encabezado, Spacer(1, 10)]
+
+                elems.append(Paragraph("Resumen", e["h2"]))
+                filas_res = [
+                    ["Concepto", "Gastos", "Pagos"],
+                    [f"Acumulado {etiqueta_acum}", _dinero(gastos_acum), _dinero(pagos_acum)],
+                    [f"Total de {nombre_mes}", _dinero(gastos_mes), _dinero(pagos_mes)],
+                    [f"Total de {alcance_texto}", _dinero(float(df_g['monto'].sum())), _dinero(float(df_p['monto'].sum()))],
+                ]
+                t_res = Table(filas_res, colWidths=[7.2 * cm, 5.5 * cm, 5.5 * cm])
+                t_res.setStyle(e["tabla"])
+                elems.append(t_res)
+                elems.append(Spacer(1, 12))
 
                 elems.append(Paragraph("Gastos", e["h2"]))
                 if df_g.empty:
@@ -3690,7 +3733,11 @@ if (not ES_ADMIN) and (not ES_RESIDENTE) and PAGINA == "Informes":
             try:
                 st.download_button(
                     "📄 Descargar Informe Semanal (PDF)",
-                    generar_informe_cliente_semana_pdf(df_g_cli, df_p_cli, alcance_cli),
+                    generar_informe_cliente_semana_pdf(
+                        df_g_cli, df_p_cli, alcance_cli,
+                        gastos_acum_cli, pagos_acum_cli, etiqueta_acum,
+                        gastos_mes_cli, pagos_mes_cli, nombre_mes_cli,
+                    ),
                     file_name=f"informe_semanal_{alcance_cli.replace(' ', '_')}_JE132.pdf",
                     mime="application/pdf",
                     key="dl_informe_cliente_semana",
