@@ -2495,8 +2495,8 @@ if PAGINA == "Inicio":
                 st.markdown("**⏭️ Lo que sigue:**")
                 st.write(inf_ult["trabajos_corto"] or "—")
 
-        st.info("⬇️ Más abajo encuentras el detalle de gastos con sus comprobantes, tus pagos, "
-                "y los informes en PDF para descargar.")
+        st.info("👆 Usa el menú de navegación de arriba (o el panel lateral) para ver el detalle "
+                "de tus Gastos con comprobantes, tus Pagos, y los Informes en PDF para descargar.")
         st.markdown("---")
 
     if ES_ADMIN:
