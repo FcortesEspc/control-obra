@@ -2081,18 +2081,26 @@ def seccion_requisiciones():
             df_cmp = (partidas_comp.rename(columns={"cantidad": "Cant.", "unidad": "Unidad", "descripcion": "Descripción"})
                       .drop(columns=["categoria", "observaciones"]).copy())
             columnas_prov = []
-            totales = {}
+            totales_por_id = {}  # clave = id real de la cotización (único), nunca el nombre del proveedor
+            etiqueta_col_por_id = {}
+            nombres_vistos = {}
             for _, c in cots_comp.iterrows():
                 pu_map = precios_comp[precios_comp["cotizacion_id"] == c["id"]].set_index("partida_id")["precio_unitario"]
-                col = c["proveedor"]
+                base_nombre = c["proveedor"]
+                nombres_vistos[base_nombre] = nombres_vistos.get(base_nombre, 0) + 1
+                # Si dos cotizaciones comparten proveedor, se numeran para no pisarse ni confundirse
+                col = base_nombre if nombres_vistos[base_nombre] == 1 else f"{base_nombre} ({nombres_vistos[base_nombre]})"
                 df_cmp[col] = df_cmp.apply(lambda r: float(pu_map.get(r["id"], 0)) * r["Cant."], axis=1)
                 columnas_prov.append(col)
-                totales[col] = df_cmp[col].sum()
+                totales_por_id[c["id"]] = float(df_cmp[col].sum())
+                etiqueta_col_por_id[c["id"]] = col
             df_cmp = df_cmp.drop(columns=["id"])
 
             st.markdown("**Comparativo de importes por proveedor** (verde = mejor precio por partida):")
+            if len(set(nombres_vistos)) < len(cots_comp):
+                st.caption("ℹ️ Hay proveedores repetidos entre las cotizaciones; se numeraron para distinguirlas.")
             fila_total = {"Cant.": None, "Unidad": "", "Descripción": "TOTAL"}
-            fila_total.update(totales)
+            fila_total.update({col: totales_por_id[cid] for cid, col in etiqueta_col_por_id.items()})
             df_cmp_total = pd.concat([df_cmp, pd.DataFrame([fila_total])], ignore_index=True)
             st.dataframe(
                 df_cmp_total.style
@@ -2152,7 +2160,8 @@ def seccion_requisiciones():
                 ganador = c1.selectbox(
                     "Proveedor seleccionado:",
                     cots_comp["id"].tolist(),
-                    format_func=lambda i: f"{cots_comp.set_index('id').loc[i, 'proveedor']} ({_dinero(totales.get(cots_comp.set_index('id').loc[i, 'proveedor'], 0))})",
+                    format_func=lambda i: f"{cots_comp.set_index('id').loc[i, 'proveedor']} "
+                                          f"({_dinero(totales_por_id.get(i, 0))})",
                     key="oc_ganador",
                 )
                 con_iva = c2.checkbox("Agregar IVA 16%", value=True, key="oc_iva")
@@ -2160,7 +2169,7 @@ def seccion_requisiciones():
                                               help="Crea automáticamente el gasto de Materiales en la fase de la requisición.")
                 if st.button("🧾 Generar Orden de Compra", key="btn_oc"):
                     prov_nombre = cots_comp.set_index("id").loc[ganador, "proveedor"]
-                    subtotal = float(totales.get(prov_nombre, 0))
+                    subtotal = float(totales_por_id.get(ganador, 0))
                     iva = round(subtotal * 0.16, 2) if con_iva else 0.0
                     total_oc = round(subtotal + iva, 2)
                     oc_id = crear_orden_compra(sel_comp, ganador, datetime.now().date().isoformat(), subtotal, iva, total_oc)
