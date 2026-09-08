@@ -303,38 +303,6 @@ ES_RESIDENTE = st.session_state.get("rol") == "residente"
 
 
 # ---------------------------------------------------------------
-# PRESUPUESTO BASE (datos de la cotización)
-# ---------------------------------------------------------------
-@st.cache_data
-def obtener_presupuesto_base() -> pd.DataFrame:
-    fases_data = [
-        {"Fase": "Fase 1: Terracerías y Cimentación", "Semanas": "1-4", "Materiales": 290000.0, "Mano de Obra": 298600.0},
-        {"Fase": "Fase 2: Estructura Principal y Muros PB", "Semanas": "5-9", "Materiales": 275000.0, "Mano de Obra": 267000.0},
-        {"Fase": "Fase 3: Losas de Entrepiso y Albañilería PA", "Semanas": "10-13", "Materiales": 255000.0, "Mano de Obra": 365000.0},
-        {"Fase": "Fase 4: Losa de Azotea y Pérgola", "Semanas": "14-16", "Materiales": 183000.0, "Mano de Obra": 195000.0},
-        {"Fase": "Fase 5: Instalaciones Hidrosanitarias y Eléctricas", "Semanas": "16-19", "Materiales": 122500.0, "Mano de Obra": 186000.0},
-        {"Fase": "Fase 6: Repellados y Yesos", "Semanas": "17-23", "Materiales": 175000.0, "Mano de Obra": 195000.0},
-    ]
-    df = pd.DataFrame(fases_data)
-    df["Subtotal Costo Directo"] = df["Materiales"] + df["Mano de Obra"]
-    return df
-
-
-INDIRECTOS = {
-    "Proyecto Arquitectónico, Dirección y Supervisión": 125000.0,
-    "Gestión Administrativa y Control": 112284.0,
-}
-
-df_presupuesto = obtener_presupuesto_base()
-FASES = df_presupuesto["Fase"].tolist()
-
-p_materiales = df_presupuesto["Materiales"].sum()
-p_mano_obra = df_presupuesto["Mano de Obra"].sum()
-p_indirectos = sum(INDIRECTOS.values())
-total_presupuestado = p_materiales + p_mano_obra + p_indirectos
-
-
-# ---------------------------------------------------------------
 # BASE DE DATOS (SQLite)
 # ---------------------------------------------------------------
 def get_conn() -> sqlite3.Connection:
@@ -359,6 +327,19 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS configuracion (
                 clave TEXT PRIMARY KEY,
                 valor TEXT
+            );
+            CREATE TABLE IF NOT EXISTS presupuesto_fases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                orden INTEGER NOT NULL,
+                fase TEXT NOT NULL UNIQUE,
+                semanas TEXT,
+                materiales REAL NOT NULL DEFAULT 0,
+                mano_obra REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS presupuesto_indirectos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                concepto TEXT NOT NULL,
+                monto REAL NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS pagos_cliente (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -460,6 +441,28 @@ def init_db() -> None:
             conn.executemany(
                 "INSERT OR IGNORE INTO catalogo_materiales (descripcion, unidad, categoria) VALUES (?, ?, ?)",
                 CATALOGO_BASE,
+            )
+        # Sembrar el presupuesto la primera vez, con los valores originales de la cotización JE132
+        # (así el presupuesto queda editable desde la app sin alterar nada de lo ya capturado).
+        if conn.execute("SELECT COUNT(*) FROM presupuesto_fases").fetchone()[0] == 0:
+            conn.executemany(
+                "INSERT INTO presupuesto_fases (orden, fase, semanas, materiales, mano_obra) VALUES (?, ?, ?, ?, ?)",
+                [
+                    (1, "Fase 1: Terracerías y Cimentación", "1-4", 290000.0, 298600.0),
+                    (2, "Fase 2: Estructura Principal y Muros PB", "5-9", 275000.0, 267000.0),
+                    (3, "Fase 3: Losas de Entrepiso y Albañilería PA", "10-13", 255000.0, 365000.0),
+                    (4, "Fase 4: Losa de Azotea y Pérgola", "14-16", 183000.0, 195000.0),
+                    (5, "Fase 5: Instalaciones Hidrosanitarias y Eléctricas", "16-19", 122500.0, 186000.0),
+                    (6, "Fase 6: Repellados y Yesos", "17-23", 175000.0, 195000.0),
+                ],
+            )
+        if conn.execute("SELECT COUNT(*) FROM presupuesto_indirectos").fetchone()[0] == 0:
+            conn.executemany(
+                "INSERT INTO presupuesto_indirectos (concepto, monto) VALUES (?, ?)",
+                [
+                    ("Proyecto Arquitectónico, Dirección y Supervisión", 125000.0),
+                    ("Gestión Administrativa y Control", 112284.0),
+                ],
             )
 
 
@@ -620,6 +623,17 @@ def insertar_pago(fecha: str, concepto: str, monto: float) -> None:
             "INSERT INTO pagos_cliente (fecha, concepto, monto) VALUES (?, ?, ?)",
             (fecha, concepto.strip(), monto),
         )
+
+
+def _siguiente_folio_sin_comprobante(desde: int = 1) -> int | None:
+    """Folio de gasto más próximo (>= desde, en orden ascendente) que aún no tiene comprobante vinculado."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM gastos WHERE id >= ? AND (comprobante IS NULL OR comprobante = '') "
+            "ORDER BY id LIMIT 1",
+            (int(desde),),
+        ).fetchone()
+    return int(row[0]) if row else None
 
 
 def eliminar_gastos(ids: list[int]) -> None:
@@ -948,6 +962,34 @@ def guardar_avance_fisico(avances: dict) -> None:
 
 
 init_db()
+
+# ---------------------------------------------------------------
+# PRESUPUESTO BASE (editable desde Administración → 🏗️ Presupuesto)
+# ---------------------------------------------------------------
+def obtener_presupuesto_base() -> pd.DataFrame:
+    with get_conn() as conn:
+        df = pd.read_sql_query(
+            "SELECT fase AS Fase, semanas AS Semanas, materiales AS Materiales, mano_obra AS \"Mano de Obra\" "
+            "FROM presupuesto_fases ORDER BY orden, id", conn,
+        )
+    df["Subtotal Costo Directo"] = df["Materiales"] + df["Mano de Obra"]
+    return df
+
+
+def obtener_indirectos_base() -> dict:
+    with get_conn() as conn:
+        filas = conn.execute("SELECT concepto, monto FROM presupuesto_indirectos ORDER BY id").fetchall()
+    return {concepto: float(monto) for concepto, monto in filas}
+
+
+df_presupuesto = obtener_presupuesto_base()
+FASES = df_presupuesto["Fase"].tolist()
+INDIRECTOS = obtener_indirectos_base()
+
+p_materiales = df_presupuesto["Materiales"].sum() if not df_presupuesto.empty else 0.0
+p_mano_obra = df_presupuesto["Mano de Obra"].sum() if not df_presupuesto.empty else 0.0
+p_indirectos = sum(INDIRECTOS.values())
+total_presupuestado = p_materiales + p_mano_obra + p_indirectos
 
 # ---------------------------------------------------------------
 # ENCABEZADO V4
@@ -3812,8 +3854,8 @@ if ES_ADMIN and PAGINA == "Administración":
         "respaldarla, explorarla, consultarla con SQL y restaurarla."
     )
 
-    tab_resp, tab_expl, tab_sql, tab_rest, tab_diag = st.tabs(
-        ["💾 Respaldo", "🔎 Explorador", "⌨️ Consola SQL", "♻️ Restaurar", "🩺 Comprobantes"]
+    tab_resp, tab_expl, tab_sql, tab_rest, tab_diag, tab_presup = st.tabs(
+        ["💾 Respaldo", "🔎 Explorador", "⌨️ Consola SQL", "♻️ Restaurar", "🩺 Comprobantes", "🏗️ Presupuesto"]
     )
 
     # --- Respaldo ---
@@ -4029,3 +4071,234 @@ if ES_ADMIN and PAGINA == "Administración":
                 st.write("\n".join(f"- `{h}`" for h in huerfanos))
                 st.caption("Suelen quedar tras renumerar folios o borrar gastos editando la tabla directamente. "
                            "Puedes re-vincularlos arriba (si coinciden por folio) o ignorarlos.")
+
+        st.markdown("---")
+        st.markdown("#### ✏️ Renombrar y vincular un comprobante a otro folio")
+        st.caption(
+            "Elige un archivo y el folio de gasto al que debe apuntar; el archivo se renombra a "
+            "`gasto_{folio}.ext` y queda vinculado a ese gasto. Si ese folio ya tiene otro comprobante "
+            "distinto, se busca automáticamente el siguiente folio libre (sin comprobante) y se usa ese en su lugar."
+        )
+        if st.session_state.pop("msg_ren_comp", None):
+            st.success(st.session_state.pop("msg_ren_comp_txt", "Comprobante renombrado y vinculado."))
+
+        archivos_todos = sorted(f.name for f in COMPROBANTES_DIR.glob("*") if f.is_file()) if dir_existe else []
+        if not archivos_todos:
+            st.info("No hay archivos de comprobantes en el almacenamiento.")
+        else:
+            with get_conn() as conn:
+                vinculos_actuales = dict(conn.execute(
+                    "SELECT comprobante, id FROM gastos WHERE comprobante IS NOT NULL AND comprobante != ''"
+                ).fetchall())
+            archivo_sel = st.selectbox(
+                "Archivo:", archivos_todos,
+                format_func=lambda f: (f"{f} — vinculado al folio {vinculos_actuales[f]}"
+                                       if f in vinculos_actuales else f"{f} — sin vincular"),
+                key="ren_comp_archivo",
+            )
+            modo_folio = st.radio(
+                "Folio destino:", ["Escribir folio exacto", "Asignar el siguiente disponible"],
+                horizontal=True, key="ren_comp_modo",
+            )
+            folio_manual = None
+            if modo_folio == "Escribir folio exacto":
+                folio_manual = st.number_input("Folio de gasto:", min_value=1, step=1, key="ren_comp_folio")
+            else:
+                st.caption("Se usará el gasto más próximo (por folio) que aún no tenga comprobante.")
+
+            if st.button("✏️ Renombrar y vincular", key="btn_ren_comp"):
+                folio_final = None
+                nota_reasignacion = ""
+                if folio_manual is not None:
+                    with get_conn() as conn:
+                        existe = conn.execute("SELECT id, comprobante FROM gastos WHERE id = ?",
+                                              (int(folio_manual),)).fetchone()
+                    if not existe:
+                        st.error(f"No existe ningún gasto con el folio {int(folio_manual)}.")
+                    else:
+                        comp_actual_destino = existe[1]
+                        if comp_actual_destino and comp_actual_destino != archivo_sel:
+                            siguiente = _siguiente_folio_sin_comprobante(int(folio_manual))
+                            if siguiente is None:
+                                st.error("Ese folio ya tiene comprobante y no se encontró ningún folio libre.")
+                            else:
+                                nota_reasignacion = (f" ⚠️ El folio {int(folio_manual)} ya tenía otro "
+                                                     f"comprobante, así que se usó el folio {siguiente} "
+                                                     "(el siguiente disponible) en su lugar.")
+                                folio_final = siguiente
+                        else:
+                            folio_final = int(folio_manual)
+                else:
+                    folio_final = _siguiente_folio_sin_comprobante(1)
+                    if folio_final is None:
+                        st.error("No se encontró ningún folio de gasto sin comprobante.")
+
+                if folio_final is not None:
+                    ruta_actual = COMPROBANTES_DIR / archivo_sel
+                    nuevo_nombre = f"gasto_{folio_final}{ruta_actual.suffix.lower()}"
+                    ruta_nueva = COMPROBANTES_DIR / nuevo_nombre
+                    try:
+                        if ruta_nueva.exists() and ruta_nueva != ruta_actual:
+                            ruta_nueva.unlink()
+                        if ruta_actual != ruta_nueva:
+                            ruta_actual.rename(ruta_nueva)
+                        # Limpiar miniaturas cacheadas del nombre anterior (se regeneran solas al ver el nuevo)
+                        mini_dir_ren = COMPROBANTES_DIR / "miniaturas"
+                        (mini_dir_ren / f"{ruta_actual.stem}.jpg").unlink(missing_ok=True)
+                        (mini_dir_ren / f"{ruta_actual.stem}_pdf.jpg").unlink(missing_ok=True)
+                        with get_conn() as conn:
+                            # El gasto que antes tenía este archivo (con su nombre viejo) queda sin comprobante
+                            conn.execute(
+                                "UPDATE gastos SET comprobante = NULL WHERE comprobante = ? AND id != ?",
+                                (archivo_sel, folio_final),
+                            )
+                            conn.execute("UPDATE gastos SET comprobante = ? WHERE id = ?",
+                                        (nuevo_nombre, folio_final))
+                        st.session_state["msg_ren_comp"] = True
+                        st.session_state["msg_ren_comp_txt"] = (
+                            f"'{archivo_sel}' renombrado a '{nuevo_nombre}' y vinculado al folio {folio_final}."
+                            + nota_reasignacion
+                        )
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"No se pudo renombrar el archivo: {err}")
+
+    # --- Presupuesto (editable, reemplaza lo que antes vivía hardcodeado en el código) ---
+    with tab_presup:
+        st.caption(
+            "Aquí defines el presupuesto base del proyecto: fases, semanas estimadas, materiales, "
+            "mano de obra e indirectos. Se guarda en la base de datos — ya no hace falta tocar el código "
+            "para ajustarlo, y sirve como punto de partida si este sistema se usa para otro proyecto."
+        )
+        if st.session_state.pop("msg_presup", None):
+            st.success(st.session_state.pop("msg_presup_txt", "Presupuesto actualizado."))
+
+        st.markdown("#### Fases del proyecto")
+        with get_conn() as conn:
+            df_fases_edit = pd.read_sql_query(
+                "SELECT id, orden, fase, semanas, materiales, mano_obra FROM presupuesto_fases ORDER BY orden, id",
+                conn,
+            )
+        df_fases_edit = df_fases_edit.rename(columns={
+            "orden": "Orden", "fase": "Fase", "semanas": "Semanas",
+            "materiales": "Materiales", "mano_obra": "Mano de Obra",
+        })
+        ver_presup = st.session_state.setdefault("ver_presup_fases", 0)
+        fases_editado = st.data_editor(
+            df_fases_edit,
+            num_rows="dynamic",
+            column_config={
+                "id": None,
+                "Orden": st.column_config.NumberColumn("Orden", min_value=1, step=1, required=True),
+                "Fase": st.column_config.TextColumn("Fase", required=True,
+                                                    help="Si renombras una fase existente, todos los gastos, "
+                                                         "requisiciones y avances ya capturados se actualizan solos."),
+                "Semanas": st.column_config.TextColumn("Semanas", help='Ej. "1-4" — solo referencia para la Curva S'),
+                "Materiales": st.column_config.NumberColumn("Materiales", format="dollar", min_value=0.0, required=True),
+                "Mano de Obra": st.column_config.NumberColumn("Mano de Obra", format="dollar", min_value=0.0, required=True),
+            },
+            hide_index=True,
+            key=f"presup_fases_editor_{ver_presup}",
+            **FULL_WIDTH,
+        )
+
+        st.markdown("#### Indirectos del proyecto")
+        with get_conn() as conn:
+            df_ind_edit = pd.read_sql_query(
+                "SELECT id, concepto, monto FROM presupuesto_indirectos ORDER BY id", conn,
+            )
+        df_ind_edit = df_ind_edit.rename(columns={"concepto": "Concepto", "monto": "Monto"})
+        ind_editado = st.data_editor(
+            df_ind_edit,
+            num_rows="dynamic",
+            column_config={
+                "id": None,
+                "Concepto": st.column_config.TextColumn("Concepto", required=True),
+                "Monto": st.column_config.NumberColumn("Monto", format="dollar", min_value=0.0, required=True),
+            },
+            hide_index=True,
+            key=f"presup_ind_editor_{ver_presup}",
+            **FULL_WIDTH,
+        )
+
+        total_prev = (
+            fases_editado["Materiales"].fillna(0).sum() + fases_editado["Mano de Obra"].fillna(0).sum()
+            + ind_editado["Monto"].fillna(0).sum()
+        )
+        st.metric("Presupuesto total con estos valores", f"${total_prev:,.2f}")
+
+        if st.button("💾 Guardar presupuesto", key="btn_guardar_presup"):
+            errores_presup = []
+            nombres_nuevos = [str(f).strip() for f in fases_editado["Fase"] if pd.notna(f) and str(f).strip()]
+            if len(nombres_nuevos) != len(set(nombres_nuevos)):
+                errores_presup.append("Hay nombres de fase repetidos; cada fase debe ser única.")
+            if fases_editado["Fase"].isna().any() or (fases_editado["Fase"].astype(str).str.strip() == "").any():
+                errores_presup.append("Ninguna fase puede quedar sin nombre.")
+            if ind_editado["Concepto"].isna().any() or (ind_editado["Concepto"].astype(str).str.strip() == "").any():
+                errores_presup.append("Ningún indirecto puede quedar sin concepto.")
+
+            # Detectar renombres (mismo id, nombre distinto) para hacer cascada, y eliminaciones para bloquear si hay datos
+            with get_conn() as conn:
+                fases_originales = dict(conn.execute("SELECT id, fase FROM presupuesto_fases").fetchall())
+            ids_editados = set(int(i) for i in fases_editado["id"].dropna())
+            ids_eliminados = set(fases_originales) - ids_editados
+            renombres = {}  # nombre_viejo -> nombre_nuevo
+            for _, r in fases_editado.iterrows():
+                if pd.notna(r["id"]) and int(r["id"]) in fases_originales:
+                    viejo = fases_originales[int(r["id"])]
+                    nuevo = str(r["Fase"]).strip()
+                    if viejo != nuevo:
+                        renombres[viejo] = nuevo
+
+            # Bloquear eliminación de fases que ya tienen datos capturados
+            fases_con_datos = []
+            if ids_eliminados:
+                with get_conn() as conn:
+                    for fid in ids_eliminados:
+                        nombre_f = fases_originales[fid]
+                        n_gastos = conn.execute("SELECT COUNT(*) FROM gastos WHERE fase = ?", (nombre_f,)).fetchone()[0]
+                        n_reqs = conn.execute("SELECT COUNT(*) FROM requisiciones WHERE fase = ?", (nombre_f,)).fetchone()[0]
+                        n_av = conn.execute("SELECT COUNT(*) FROM avance_fisico WHERE fase = ?", (nombre_f,)).fetchone()[0]
+                        if n_gastos or n_reqs or n_av:
+                            fases_con_datos.append((nombre_f, n_gastos, n_reqs, n_av))
+            if fases_con_datos:
+                detalle = "; ".join(f"'{n}' ({g} gastos, {r} requisiciones, {a} avances)"
+                                    for n, g, r, a in fases_con_datos)
+                errores_presup.append(
+                    f"No se puede eliminar: {detalle} — ya tienen información capturada. "
+                    "Si ya no aplica, deja la fase pero ponle Materiales y Mano de Obra en $0."
+                )
+
+            if errores_presup:
+                st.error("No se guardó nada. Corrige lo siguiente:\n\n- " + "\n- ".join(errores_presup))
+            else:
+                with get_conn() as conn:
+                    # Cascada de renombres antes de tocar las tablas de presupuesto
+                    for viejo, nuevo in renombres.items():
+                        conn.execute("UPDATE gastos SET fase = ? WHERE fase = ?", (nuevo, viejo))
+                        conn.execute("UPDATE requisiciones SET fase = ? WHERE fase = ?", (nuevo, viejo))
+                        conn.execute("UPDATE avance_fisico SET fase = ? WHERE fase = ?", (nuevo, viejo))
+
+                    conn.execute("DELETE FROM presupuesto_fases")
+                    conn.executemany(
+                        "INSERT INTO presupuesto_fases (id, orden, fase, semanas, materiales, mano_obra) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        [
+                            (int(r["id"]) if pd.notna(r["id"]) else None, int(r["Orden"]), str(r["Fase"]).strip(),
+                             str(r["Semanas"] or "").strip(), float(r["Materiales"]), float(r["Mano de Obra"]))
+                            for _, r in fases_editado.iterrows()
+                        ],
+                    )
+                    conn.execute("DELETE FROM presupuesto_indirectos")
+                    conn.executemany(
+                        "INSERT INTO presupuesto_indirectos (id, concepto, monto) VALUES (?, ?, ?)",
+                        [
+                            (int(r["id"]) if pd.notna(r["id"]) else None, str(r["Concepto"]).strip(), float(r["Monto"]))
+                            for _, r in ind_editado.iterrows()
+                        ],
+                    )
+                st.session_state["msg_presup"] = True
+                nota_renombres = f" Se actualizaron {len(renombres)} fase(s) renombrada(s) en todos sus registros." if renombres else ""
+                st.session_state["msg_presup_txt"] = "Presupuesto guardado." + nota_renombres
+                st.session_state["ver_presup_fases"] = ver_presup + 1
+                st.rerun()
