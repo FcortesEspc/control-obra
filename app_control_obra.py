@@ -2532,6 +2532,52 @@ if PAGINA == "Inicio":
                 getattr(st, nivel)(mensaje)
 
         st.markdown("---")
+        col_sem, col_inf = st.columns(2)
+        with col_sem:
+            inicio_s1_dash = _inicio_semana1()
+            if not inicio_s1_dash:
+                st.markdown("#### 📅 Gastos de la semana en curso")
+                st.info("Configura el inicio de la Semana 1 en 📄 Informes → Informe por Tipo de Gasto → "
+                        "⚙️ para ver aquí el corte semanal.")
+            else:
+                semana_actual_dash = _semana_de_fecha(datetime.now().date(), inicio_s1_dash)
+                ini_sem_dash, fin_sem_dash = _rango_semana(semana_actual_dash, inicio_s1_dash)
+                st.markdown(f"#### 📅 Gastos de la Semana {semana_actual_dash}")
+                st.caption(f"lunes {_f_fecha(ini_sem_dash)} a domingo {_f_fecha(fin_sem_dash)}")
+                df_g_semana_dash = df_gastos[(df_gastos["fecha"] >= ini_sem_dash.isoformat())
+                                             & (df_gastos["fecha"] <= fin_sem_dash.isoformat())]
+                g_mat_dash = float(df_g_semana_dash.loc[df_g_semana_dash["tipo"] == "Materiales", "monto"].sum())
+                g_mo_dash = float(df_g_semana_dash.loc[df_g_semana_dash["tipo"] == "Mano de Obra", "monto"].sum())
+                g_ind_dash = float(df_g_semana_dash.loc[df_g_semana_dash["tipo"] == FASE_INDIRECTOS, "monto"].sum())
+                sd1, sd2 = st.columns(2)
+                sd1.metric("Materiales", f"${g_mat_dash:,.2f}")
+                sd2.metric("Mano de Obra", f"${g_mo_dash:,.2f}")
+                st.metric("Total de la semana", f"${(g_mat_dash + g_mo_dash + g_ind_dash):,.2f}",
+                         f"{len(df_g_semana_dash)} movimiento(s)", delta_color="off")
+
+        with col_inf:
+            st.markdown("#### 📋 Últimos informes de avance")
+            df_inf_recientes = leer_informes_avance()
+            if df_inf_recientes.empty:
+                st.info("Aún no se han redactado informes de avance. Redáctalos en 📝 Bitácora.")
+            else:
+                for _, inf_r in df_inf_recientes.head(3).iterrows():
+                    ir1, ir2 = st.columns([4, 1])
+                    ir1.markdown(f"**{folio_inf(inf_r['id'])}** — {inf_r['periodo']}  \n"
+                                f"<span style='color:var(--muted); font-size:.85rem;'>{_f_fecha(inf_r['fecha'])}</span>",
+                                unsafe_allow_html=True)
+                    with ir2:
+                        try:
+                            inf_completo_dash = leer_informe_avance(int(inf_r["id"]))
+                            st.download_button(
+                                "PDF", generar_pdf_informe_avance(inf_completo_dash),
+                                file_name=f"{folio_inf(inf_r['id'])}.pdf", mime="application/pdf",
+                                key=f"dash_inf_{inf_r['id']}",
+                            )
+                        except ImportError:
+                            st.caption("—")
+
+        st.markdown("---")
         _titulo_seccion("Curva S", "Programado vs. avance físico y financiero")
         st.caption(
             "La línea programada es una referencia construida con las semanas estimadas del presupuesto base. "
