@@ -800,6 +800,24 @@ def eliminar_requisicion(req_id: int) -> None:
 
 def crear_cotizacion(req_id: int, proveedor: str, fecha: str, entrega: str, pago: str, precios: dict, obs: dict | None = None) -> int:
     with get_conn() as conn:
+        # Salvaguarda anti-doble-envío: si ya existe una cotización IDÉNTICA (mismo proveedor,
+        # misma fecha y mismos precios) para esta requisición, se devuelve esa en vez de duplicarla.
+        # Protege contra doble clic / doble toque en el botón de guardar.
+        precios_nuevos = {int(k): round(float(v), 2) for k, v in precios.items()}
+        for (cid_existente,) in conn.execute(
+            "SELECT id FROM cotizaciones WHERE requisicion_id = ? AND proveedor = ? AND fecha = ?",
+            (int(req_id), proveedor.strip(), fecha),
+        ).fetchall():
+            precios_existentes = {
+                int(pid): round(float(pu), 2)
+                for pid, pu in conn.execute(
+                    "SELECT partida_id, precio_unitario FROM cotizacion_precios WHERE cotizacion_id = ?",
+                    (cid_existente,),
+                ).fetchall()
+            }
+            if precios_existentes == precios_nuevos:
+                return cid_existente
+
         cur = conn.execute(
             "INSERT INTO cotizaciones (requisicion_id, proveedor, fecha, tiempo_entrega, condiciones_pago) VALUES (?, ?, ?, ?, ?)",
             (int(req_id), proveedor.strip(), fecha, entrega.strip(), pago.strip()),
@@ -1998,17 +2016,27 @@ def seccion_requisiciones():
             st.caption("✏️ Cantidad, unidad y descripción también son corregibles aquí: el cambio se guarda "
                        "en la requisición y aplica a todas sus cotizaciones. Las observaciones y el precio "
                        "son propios de esta cotización.")
-            if st.button("💾 Guardar cotización", key="btn_guardar_cot"):
+            if "cot_guardando" not in st.session_state:
+                st.session_state["cot_guardando"] = False
+            clic_guardar_cot = st.button(
+                "💾 Guardar cotización", key="btn_guardar_cot",
+                disabled=st.session_state["cot_guardando"],
+            )
+            if clic_guardar_cot:
+                st.session_state["cot_guardando"] = True
                 precios = {int(r["id"]): float(r["Precio Unitario"] or 0) for _, r in precios_edit.iterrows()}
                 partida_invalida = any(
                     (pd.isna(r["Cantidad"]) or float(r["Cantidad"]) <= 0
                      or not str(r["Unidad"] or "").strip() or not str(r["Descripción"] or "").strip())
                     for _, r in precios_edit.iterrows())
                 if partida_invalida:
+                    st.session_state["cot_guardando"] = False
                     st.error("Cantidad, unidad y descripción no pueden quedar vacías en ninguna partida.")
                 elif not proveedor_cot.strip():
+                    st.session_state["cot_guardando"] = False
                     st.error("Indica el nombre del proveedor.")
                 elif not any(v > 0 for v in precios.values()):
+                    st.session_state["cot_guardando"] = False
                     st.error("Captura al menos un precio unitario mayor a 0.")
                 else:
                     sincronizar_partidas_basicas([
@@ -2016,6 +2044,7 @@ def seccion_requisiciones():
                         for _, r in precios_edit.iterrows()])
                     obs_cap = {int(r["id"]): str(r["Observaciones"] or "") for _, r in precios_edit.iterrows()}
                     crear_cotizacion(sel_cot, proveedor_cot, fecha_cot.isoformat(), entrega_cot, pago_cot, precios, obs_cap)
+                    st.session_state["cot_guardando"] = False
                     st.session_state["msg_cot"] = True
                     st.session_state.pop(f"cot_precios_{sel_cot}", None)
                     st.rerun()
