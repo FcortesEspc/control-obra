@@ -340,6 +340,12 @@ def init_db() -> None:
                 concepto TEXT NOT NULL,
                 monto REAL NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS resumen_conceptos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                orden INTEGER NOT NULL,
+                concepto TEXT NOT NULL,
+                importe REAL NOT NULL DEFAULT 0
+            );
             CREATE TABLE IF NOT EXISTS pagos_cliente (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 fecha TEXT NOT NULL,
@@ -1010,6 +1016,23 @@ def obtener_indirectos_base() -> dict:
     with get_conn() as conn:
         filas = conn.execute("SELECT concepto, monto FROM presupuesto_indirectos ORDER BY id").fetchall()
     return {concepto: float(monto) for concepto, monto in filas}
+
+
+def leer_resumen_conceptos() -> pd.DataFrame:
+    with get_conn() as conn:
+        return pd.read_sql_query(
+            "SELECT id, orden, concepto, importe FROM resumen_conceptos ORDER BY orden, id", conn
+        )
+
+
+def guardar_resumen_conceptos(filas: list[dict]) -> None:
+    """Reemplaza el resumen completo con las filas dadas: [{'concepto': str, 'importe': float}, ...]."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM resumen_conceptos")
+        conn.executemany(
+            "INSERT INTO resumen_conceptos (orden, concepto, importe) VALUES (?, ?, ?)",
+            [(i + 1, f["concepto"], f["importe"]) for i, f in enumerate(filas)],
+        )
 
 
 df_presupuesto = obtener_presupuesto_base()
@@ -2401,6 +2424,62 @@ def generar_pdf_informe_avance(inf: pd.Series) -> bytes:
     return buf.getvalue()
 
 
+def generar_pdf_resumen_concepto(titulo: str, filas: list[dict]) -> bytes:
+    """Reporte libre: Total arriba, tabla Concepto/Importe debajo. Los importes se capturan a mano,
+    no provienen de los gastos del sistema — pensado para desgloses o cotizaciones rápidas."""
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    e = _pdf_estilos()
+    total = sum(f["importe"] for f in filas)
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.6 * cm, bottomMargin=2.4 * cm,
+                            leftMargin=1.5 * cm, rightMargin=1.5 * cm, title=titulo)
+
+    encabezado = Table([
+        [titulo.upper(), f"Emitido: {datetime.now():%d-%m-%Y}"],
+        [f"Obra: {OBRA_TITULO}", ""],
+    ], colWidths=[12.2 * cm, 6.4 * cm])
+    encabezado.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (0, 0), 15),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+    ]))
+    elems = [encabezado, Spacer(1, 14)]
+
+    t_total = Table([["Total", _dinero(total)]], colWidths=[13 * cm, 4.5 * cm])
+    t_total.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 13),
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+    ]))
+    elems.append(t_total)
+    elems.append(Spacer(1, 16))
+
+    filas_tabla = [["Concepto", "Importe"]]
+    for f in filas:
+        filas_tabla.append([Paragraph(f["concepto"], e["normal"]), _dinero(f["importe"])])
+    t_conceptos = Table(filas_tabla, colWidths=[13 * cm, 4.5 * cm], repeatRows=1)
+    t_conceptos.setStyle(e["tabla"])
+    elems.append(t_conceptos)
+
+    elems.append(Spacer(1, 10))
+    elems.append(Paragraph(f"Documento generado el {datetime.now():%d-%m-%Y %H:%M}.", e["chico"]))
+    doc.build(elems, onFirstPage=_membrete_pdf, onLaterPages=_membrete_pdf)
+    return buf.getvalue()
+
+
 def seccion_informes_avance(puede_editar: bool):
     st.markdown("---")
     st.subheader("📝 Informes de Avance de Obra")
@@ -3706,6 +3785,77 @@ if ES_ADMIN and PAGINA == "Informes":
                     file_name=f"informe_periodo_{d_iso}_a_{h_iso}_{CODIGO_OBRA}.pdf",
                     mime="application/pdf",
                     key="dl_inf_periodo",
+                    **FULL_WIDTH,
+                )
+            except ImportError:
+                st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
+    st.markdown("---")
+    with st.expander("📝 Resumen por Concepto (manual)"):
+        st.caption(
+            "Arma un resumen libre: escribe los conceptos que necesites y su importe. No depende de los "
+            "gastos capturados en el sistema — útil para presentar un desglose rápido, una cotización "
+            "propia o cualquier concentrado que no siga la estructura fija del presupuesto."
+        )
+        if st.session_state.pop("msg_resumen_concepto", None):
+            st.success("Resumen guardado.")
+
+        titulo_resumen = st.text_input(
+            "Título del reporte:", value=leer_config("resumen_concepto_titulo", "Resumen Concepto"),
+            key="resumen_concepto_titulo_in",
+        )
+
+        df_resumen_actual = leer_resumen_conceptos()
+        if df_resumen_actual.empty:
+            df_resumen_actual = pd.DataFrame({"concepto": pd.array([], dtype="object"),
+                                              "importe": pd.array([], dtype="float")})
+        df_resumen_vista = df_resumen_actual[["concepto", "importe"]].rename(
+            columns={"concepto": "Concepto", "importe": "Importe"})
+        ver_resumen_c = st.session_state.setdefault("ver_resumen_concepto", 0)
+        resumen_editado = st.data_editor(
+            df_resumen_vista,
+            num_rows="dynamic",
+            column_config={
+                "Concepto": st.column_config.TextColumn("Concepto", required=True),
+                "Importe": st.column_config.NumberColumn("Importe", format="dollar", min_value=0.0, required=True),
+            },
+            hide_index=True,
+            key=f"resumen_concepto_editor_{ver_resumen_c}",
+            **FULL_WIDTH,
+        )
+        total_resumen = resumen_editado["Importe"].fillna(0).sum()
+        st.metric("Total", f"${total_resumen:,.2f}")
+
+        col_rc1, col_rc2 = st.columns([1, 3])
+        with col_rc1:
+            if st.button("💾 Guardar resumen", key="btn_guardar_resumen_concepto"):
+                conceptos_validos = [
+                    {"concepto": str(r["Concepto"]).strip(), "importe": float(r["Importe"] or 0)}
+                    for _, r in resumen_editado.iterrows()
+                    if pd.notna(r["Concepto"]) and str(r["Concepto"]).strip()
+                ]
+                if not conceptos_validos:
+                    st.error("Agrega al menos un concepto con su importe.")
+                else:
+                    guardar_config("resumen_concepto_titulo", titulo_resumen.strip() or "Resumen Concepto")
+                    guardar_resumen_conceptos(conceptos_validos)
+                    st.session_state["msg_resumen_concepto"] = True
+                    st.session_state["ver_resumen_concepto"] = ver_resumen_c + 1
+                    st.rerun()
+        with col_rc2:
+            try:
+                filas_pdf = [
+                    {"concepto": str(r["Concepto"]).strip(), "importe": float(r["Importe"] or 0)}
+                    for _, r in resumen_editado.iterrows()
+                    if pd.notna(r["Concepto"]) and str(r["Concepto"]).strip()
+                ]
+                st.download_button(
+                    "📄 Descargar Resumen por Concepto (PDF)",
+                    generar_pdf_resumen_concepto(titulo_resumen.strip() or "Resumen Concepto", filas_pdf),
+                    file_name=f"resumen_concepto_{CODIGO_OBRA}_{datetime.now():%Y%m%d}.pdf",
+                    mime="application/pdf",
+                    key="dl_resumen_concepto",
+                    disabled=not filas_pdf,
                     **FULL_WIDTH,
                 )
             except ImportError:
