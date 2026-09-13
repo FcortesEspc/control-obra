@@ -447,20 +447,105 @@ def init_db() -> None:
                 "INSERT OR IGNORE INTO catalogo_materiales (descripcion, unidad, categoria) VALUES (?, ?, ?)",
                 CATALOGO_BASE,
             )
+        # Migración v8: descripciones técnicas por fase, para el formato de Cotización de Proyecto
+        cols_pf = [c[1] for c in conn.execute("PRAGMA table_info(presupuesto_fases)").fetchall()]
+        if "descripcion_materiales" not in cols_pf:
+            conn.execute("ALTER TABLE presupuesto_fases ADD COLUMN descripcion_materiales TEXT DEFAULT ''")
+            conn.execute("ALTER TABLE presupuesto_fases ADD COLUMN descripcion_mano_obra TEXT DEFAULT ''")
+
         # Sembrar el presupuesto la primera vez, con los valores originales de la cotización JE132
         # (así el presupuesto queda editable desde la app sin alterar nada de lo ya capturado).
         if conn.execute("SELECT COUNT(*) FROM presupuesto_fases").fetchone()[0] == 0:
             conn.executemany(
-                "INSERT INTO presupuesto_fases (orden, fase, semanas, materiales, mano_obra) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO presupuesto_fases "
+                "(orden, fase, semanas, materiales, mano_obra, descripcion_materiales, descripcion_mano_obra) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (1, "Fase 1: Terracerías y Cimentación", "1-4", 290000.0, 298600.0),
-                    (2, "Fase 2: Estructura Principal y Muros PB", "5-9", 275000.0, 267000.0),
-                    (3, "Fase 3: Losas de Entrepiso y Albañilería PA", "10-13", 255000.0, 365000.0),
-                    (4, "Fase 4: Losa de Azotea y Pérgola", "14-16", 183000.0, 195000.0),
-                    (5, "Fase 5: Instalaciones Hidrosanitarias y Eléctricas", "16-19", 122500.0, 186000.0),
-                    (6, "Fase 6: Repellados y Yesos", "17-23", 175000.0, 195000.0),
+                    (1, "Fase 1: Terracerías y Cimentación", "1-4", 290000.0, 298600.0,
+                     "Suministro de materiales base: Tepetate limpio de banco, acero de refuerzo comercial, "
+                     "bultos de cemento gris, compactación al 95% proctor e impermeabilizante con plástico "
+                     "negro 600 micras, de desplante.",
+                     "Limpieza, trazo topográfico del lote, excavación mecánica para mejoramiento de terreno, "
+                     "habilitado, armado y construcción de contratrabes, losa de cimentación y desplante del "
+                     "zoclo de mampostería frontal."),
+                    (2, "Fase 2: Estructura Principal y Muros PB", "5-9", 275000.0, 267000.0,
+                     "Suministro de materiales: tabique rojo y/o blocks pesados de concreto 15x20x40 y mortero "
+                     "cemento-arena, varilla, anillos, etc.",
+                     "Levantamiento de muros perimetrales de block, cimbrado, habilitado, armado y colado de "
+                     "columnas y muros de concreto. Montaje e ingeniería de soldadura de las vigas de acero IPR "
+                     "para la Doble Altura y claros amplios o mayores de 6.00 mtrs."),
+                    (3, "Fase 3: Losas de Entrepiso y Albañilería PA", "10-13", 255000.0, 365000.0,
+                     "Suministro de materiales: Concreto premezclado de planta f'c=250 kg/cm2, servicio de "
+                     "pluma telescópica de bombeo, varilla corrugada, casetones y cimbra.",
+                     "Cimbrado de losa de entrepiso, habilitado y armado de nervaduras de acero, colocación de "
+                     "casetones y colado masivo. Levantamiento de muros, columnas y muros de concreto de "
+                     "Planta Alta."),
+                    (4, "Fase 4: Losa de Azotea y Pérgola", "14-16", 183000.0, 195000.0,
+                     "Suministro de materiales, lamas superiores de madera tecnológica WPC color nogal para "
+                     "sombra, bultos de block perimetral y cemento.",
+                     "Cimbrado y colado de la losa de azotea (Roof Garden). Levantamiento de muros del cuarto "
+                     "de lavado y cuarto de servicio posterior con su módulo sanitario."),
+                    (5, "Fase 5: Instalaciones Hidrosanitarias y Eléctricas", "16-19", 122500.0, 186000.0,
+                     "Suministro de materiales: Tubería de alta presión CPVC/PPR para alimentación hidráulica, "
+                     "PVC sanitario pesado para desagües, poliducto naranja y cableado THW calibre 12.",
+                     "Construcción y tendido de ramales ocultos de desagüe, canalización eléctrica y "
+                     "preparación de cajas de paso para CCTV, y detalles para pruebas de presión y cuadrilla "
+                     "de apoyo mecánico."),
+                    (6, "Fase 6: Repellados y Yesos", "17-23", 175000.0, 195000.0,
+                     "Suministro de materiales: Yeso fino, bultos de cal, agregados criba (arena de mina), "
+                     "recubrimiento texturizado de piedra gris oscura, pegazulejo y aditivos de agarre.",
+                     "Aplicación general de repellados y aplanados de cemento-arena en fachadas e interiores; "
+                     "en su caso, revestimientos de piedra rústica en muros focales y zoclos monumentales, "
+                     "andamios perimetrales."),
                 ],
             )
+        else:
+            # Backfill: si estas 6 fases ya existían de antes (base en producción), se completan
+            # las descripciones técnicas sin tocar nada más de lo ya capturado.
+            descripciones_backfill = {
+                "Fase 1: Terracerías y Cimentación": (
+                    "Suministro de materiales base: Tepetate limpio de banco, acero de refuerzo comercial, "
+                    "bultos de cemento gris, compactación al 95% proctor e impermeabilizante con plástico "
+                    "negro 600 micras, de desplante.",
+                    "Limpieza, trazo topográfico del lote, excavación mecánica para mejoramiento de terreno, "
+                    "habilitado, armado y construcción de contratrabes, losa de cimentación y desplante del "
+                    "zoclo de mampostería frontal."),
+                "Fase 2: Estructura Principal y Muros PB": (
+                    "Suministro de materiales: tabique rojo y/o blocks pesados de concreto 15x20x40 y mortero "
+                    "cemento-arena, varilla, anillos, etc.",
+                    "Levantamiento de muros perimetrales de block, cimbrado, habilitado, armado y colado de "
+                    "columnas y muros de concreto. Montaje e ingeniería de soldadura de las vigas de acero IPR "
+                    "para la Doble Altura y claros amplios o mayores de 6.00 mtrs."),
+                "Fase 3: Losas de Entrepiso y Albañilería PA": (
+                    "Suministro de materiales: Concreto premezclado de planta f'c=250 kg/cm2, servicio de "
+                    "pluma telescópica de bombeo, varilla corrugada, casetones y cimbra.",
+                    "Cimbrado de losa de entrepiso, habilitado y armado de nervaduras de acero, colocación de "
+                    "casetones y colado masivo. Levantamiento de muros, columnas y muros de concreto de "
+                    "Planta Alta."),
+                "Fase 4: Losa de Azotea y Pérgola": (
+                    "Suministro de materiales, lamas superiores de madera tecnológica WPC color nogal para "
+                    "sombra, bultos de block perimetral y cemento.",
+                    "Cimbrado y colado de la losa de azotea (Roof Garden). Levantamiento de muros del cuarto "
+                    "de lavado y cuarto de servicio posterior con su módulo sanitario."),
+                "Fase 5: Instalaciones Hidrosanitarias y Eléctricas": (
+                    "Suministro de materiales: Tubería de alta presión CPVC/PPR para alimentación hidráulica, "
+                    "PVC sanitario pesado para desagües, poliducto naranja y cableado THW calibre 12.",
+                    "Construcción y tendido de ramales ocultos de desagüe, canalización eléctrica y "
+                    "preparación de cajas de paso para CCTV, y detalles para pruebas de presión y cuadrilla "
+                    "de apoyo mecánico."),
+                "Fase 6: Repellados y Yesos": (
+                    "Suministro de materiales: Yeso fino, bultos de cal, agregados criba (arena de mina), "
+                    "recubrimiento texturizado de piedra gris oscura, pegazulejo y aditivos de agarre.",
+                    "Aplicación general de repellados y aplanados de cemento-arena en fachadas e interiores; "
+                    "en su caso, revestimientos de piedra rústica en muros focales y zoclos monumentales, "
+                    "andamios perimetrales."),
+            }
+            for nombre_fase, (desc_mat, desc_mo) in descripciones_backfill.items():
+                conn.execute(
+                    "UPDATE presupuesto_fases SET descripcion_materiales = ?, descripcion_mano_obra = ? "
+                    "WHERE fase = ? AND (descripcion_materiales IS NULL OR descripcion_materiales = '')",
+                    (desc_mat, desc_mo, nombre_fase),
+                )
         if conn.execute("SELECT COUNT(*) FROM presupuesto_indirectos").fetchone()[0] == 0:
             conn.executemany(
                 "INSERT INTO presupuesto_indirectos (concepto, monto) VALUES (?, ?)",
@@ -480,6 +565,49 @@ def init_db() -> None:
                 ("contratistas_texto", "DACAM & HOGAR 911"),
                 ("pie_direccion", "José García Preciat 835, Tlalpan C.P. 14250"),
                 ("pie_telefono", "5535375870"),
+                ("cotizacion_folio", "260043"),
+                ("cotizacion_tagline", "Construcción, Remodelación, Pintura, Mantenimiento, Seguridad Electrónica"),
+                ("cotizacion_direccion_obra", "Juan Enriquez No.132"),
+                ("cotizacion_descripcion_general",
+                 "Proyecto integral de Obra Negra, Obra Gris para vivienda familiar. (325 m² de construcción)\n\n"
+                 "Obra Negra: Excavaciones, cimentación (preparada para soportar sismos y los 3 niveles), "
+                 "levantamiento de muros de block, castillos, columnas de concreto y el tendido de las losas "
+                 "reticulares (entrepiso y azotea). Incluyen la sala doble altura parcial y la cocina con "
+                 "columnas intermedias.\n\n"
+                 "Obra Gris: Aplanados de muros interiores y exteriores (repellados de cemento-arena listos "
+                 "para recibir yeso o pintura), firme de concreto en pisos, tendido de tuberías ocultas para "
+                 "instalaciones eléctricas, hidrodinámicas y sanitarias (mangueras y ductos vacíos dentro de "
+                 "los muros)."),
+                ("cotizacion_anticipo_pct", "16"),
+                ("cotizacion_anticipo_monto", "500000"),
+                ("cotizacion_anticipo_nota", "en dos pagos con 15 días de diferencia"),
+                ("cotizacion_anticipo_texto",
+                 "Considerando que este proyecto incluye insumos de alto valor desde el inicio, se requiere un "
+                 "anticipo del 16% destinado al inicio inmediato de terracerías, compra del volumen de tepetate "
+                 "de banco, adquisición del acero comercial/varillas, materiales estándar para construcción y "
+                 "mano de obra."),
+                ("cotizacion_subsecuentes_pct", "77"),
+                ("cotizacion_subsecuentes_monto", "2326500"),
+                ("cotizacion_subsecuentes_texto",
+                 "Se realizarán mediante la presentación de Estimaciones de Avance de Obra por fase entregada "
+                 "(vaciado de losas, levantamiento de muros, aplanados grises) siempre sobre el avance físico "
+                 "real en el predio."),
+                ("cotizacion_finiquito_pct", "7"),
+                ("cotizacion_finiquito_monto", "217884"),
+                ("cotizacion_finiquito_texto",
+                 "Se liquidará contra entrega física del inmueble en la última semana que se estima un máximo "
+                 "de 25, entregado llave en mano."),
+                ("cotizacion_vigencia_dias", "15"),
+                ("cotizacion_plazo_min_semanas", "21"),
+                ("cotizacion_plazo_max_semanas", "25"),
+                ("cotizacion_trabajos_adicionales",
+                 "Cualquier modificación arquitectónica al plano ejecutivo original o adición de obra, se "
+                 "cotizará de forma independiente por escrito y requiere la firma de aceptación por parte del "
+                 "cliente antes de ejecutarla."),
+                ("cotizacion_nota_extra",
+                 "El Proyecto Arquitectónico incluye el desarrollo de los planos de 3 departamentos en la "
+                 "parte frontal del predio."),
+                ("cotizacion_firma_nombre", "Fernando Cortés Figueroa"),
             ],
         )
 
@@ -1005,7 +1133,9 @@ init_db()
 def obtener_presupuesto_base() -> pd.DataFrame:
     with get_conn() as conn:
         df = pd.read_sql_query(
-            "SELECT fase AS Fase, semanas AS Semanas, materiales AS Materiales, mano_obra AS \"Mano de Obra\" "
+            "SELECT fase AS Fase, semanas AS Semanas, materiales AS Materiales, mano_obra AS \"Mano de Obra\", "
+            "COALESCE(descripcion_materiales, '') AS descripcion_materiales, "
+            "COALESCE(descripcion_mano_obra, '') AS descripcion_mano_obra "
             "FROM presupuesto_fases ORDER BY orden, id", conn,
         )
     df["Subtotal Costo Directo"] = df["Materiales"] + df["Mano de Obra"]
@@ -1054,6 +1184,28 @@ CONTRATISTAS_TEXTO = leer_config("contratistas_texto", "DACAM & HOGAR 911")
 PIE_DIRECCION = leer_config("pie_direccion", "José García Preciat 835, Tlalpan C.P. 14250")
 PIE_TELEFONO = leer_config("pie_telefono", "5535375870")
 OBRA_TITULO = f"{NOMBRE_OBRA} ({CODIGO_OBRA})"  # combinación lista para "Obra: {OBRA_TITULO}"
+
+# --- Datos del formato "Cotización de Proyecto" (editable en Administración → 🏗️ Presupuesto) ---
+COTIZACION_FOLIO = leer_config("cotizacion_folio", "001")
+COTIZACION_TAGLINE = leer_config("cotizacion_tagline", "Construcción, Remodelación, Pintura, Mantenimiento, Seguridad Electrónica")
+COTIZACION_DIRECCION_OBRA = leer_config("cotizacion_direccion_obra", "")
+COTIZACION_DESCRIPCION_GENERAL = leer_config("cotizacion_descripcion_general", "")
+COTIZACION_ANTICIPO_PCT = float(leer_config("cotizacion_anticipo_pct", "16") or 16)
+COTIZACION_ANTICIPO_MONTO = float(leer_config("cotizacion_anticipo_monto", "0") or 0)
+COTIZACION_ANTICIPO_NOTA = leer_config("cotizacion_anticipo_nota", "")
+COTIZACION_ANTICIPO_TEXTO = leer_config("cotizacion_anticipo_texto", "")
+COTIZACION_SUBSECUENTES_PCT = float(leer_config("cotizacion_subsecuentes_pct", "77") or 77)
+COTIZACION_SUBSECUENTES_MONTO = float(leer_config("cotizacion_subsecuentes_monto", "0") or 0)
+COTIZACION_SUBSECUENTES_TEXTO = leer_config("cotizacion_subsecuentes_texto", "")
+COTIZACION_FINIQUITO_PCT = float(leer_config("cotizacion_finiquito_pct", "7") or 7)
+COTIZACION_FINIQUITO_MONTO = float(leer_config("cotizacion_finiquito_monto", "0") or 0)
+COTIZACION_FINIQUITO_TEXTO = leer_config("cotizacion_finiquito_texto", "")
+COTIZACION_VIGENCIA_DIAS = leer_config("cotizacion_vigencia_dias", "15")
+COTIZACION_PLAZO_MIN_SEMANAS = leer_config("cotizacion_plazo_min_semanas", "21")
+COTIZACION_PLAZO_MAX_SEMANAS = leer_config("cotizacion_plazo_max_semanas", "25")
+COTIZACION_TRABAJOS_ADICIONALES = leer_config("cotizacion_trabajos_adicionales", "")
+COTIZACION_NOTA_EXTRA = leer_config("cotizacion_nota_extra", "")
+COTIZACION_FIRMA_NOMBRE = leer_config("cotizacion_firma_nombre", "")
 
 # ---------------------------------------------------------------
 # ENCABEZADO V4
@@ -2480,6 +2632,240 @@ def generar_pdf_resumen_concepto(titulo: str, filas: list[dict]) -> bytes:
     return buf.getvalue()
 
 
+def _membrete_cotizacion_pdf(canvas, doc):
+    """Membrete específico del formato Cotización de Proyecto: logos + leyenda de servicios
+    arriba, folio de cotización, y el mismo pie de página (dirección/teléfono) en cada hoja."""
+    import base64
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.lib.utils import ImageReader
+
+    canvas.saveState()
+    ancho, alto = doc.pagesize
+    y_logos = alto - 1.0 * cm
+    try:
+        logo_d = ImageReader(BytesIO(base64.b64decode(LOGO_DACAM_B64)))
+        iw, ih = logo_d.getSize()
+        h_d = 1.7 * cm
+        canvas.drawImage(logo_d, 1.3 * cm, y_logos - h_d, width=iw * h_d / ih, height=h_d, mask="auto")
+        logo_h = ImageReader(BytesIO(base64.b64decode(LOGO_HOGAR911_B64)))
+        iw2, ih2 = logo_h.getSize()
+        h_h = 1.35 * cm
+        canvas.drawImage(logo_h, ancho - 1.3 * cm - iw2 * h_h / ih2, y_logos - h_h - 0.1 * cm,
+                         width=iw2 * h_h / ih2, height=h_h, mask="auto")
+    except Exception:
+        pass
+    canvas.setFont("Helvetica-Bold", 8)
+    canvas.setFillColor(colors.HexColor("#1f3a5f"))
+    canvas.drawString(1.3 * cm, y_logos - 2.05 * cm, COTIZACION_TAGLINE)
+
+    canvas.setFont("Helvetica-Bold", 11)
+    canvas.setFillColor(colors.black)
+    canvas.drawRightString(ancho - 3.0 * cm, y_logos - 2.5 * cm, "Cotización de Proyecto")
+    canvas.setFillColor(colors.HexColor("#1f3a5f"))
+    canvas.roundRect(ancho - 2.8 * cm, y_logos - 2.75 * cm, 1.5 * cm, 0.55 * cm, 3, fill=1, stroke=0)
+    canvas.setFillColor(colors.white)
+    canvas.setFont("Helvetica-Bold", 9)
+    canvas.drawCentredString(ancho - 2.05 * cm, y_logos - 2.6 * cm, f"No. {COTIZACION_FOLIO}")
+
+    canvas.setFont("Helvetica-Bold", 9)
+    canvas.setFillColor(colors.black)
+    y_pie = 1.15 * cm
+    canvas.drawString(1.5 * cm, y_pie, PIE_DIRECCION)
+    canvas.drawRightString(ancho - 1.5 * cm, y_pie, PIE_TELEFONO)
+    canvas.setLineWidth(0.8)
+    canvas.line(1.5 * cm, y_pie - 3, ancho - 1.5 * cm, y_pie - 3)
+    canvas.restoreState()
+
+
+def generar_pdf_cotizacion_proyecto() -> bytes:
+    """Formato de Cotizacion de Proyecto: fases con clave y descripcion tecnica por concepto
+    (materiales / mano de obra), subtotal, indirectos, total, condiciones de pago y notas."""
+    from io import BytesIO
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    e = _pdf_estilos()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter, topMargin=3.4 * cm, bottomMargin=2.2 * cm,
+                            leftMargin=1.3 * cm, rightMargin=1.3 * cm,
+                            title=f"Cotizacion de Proyecto No. {COTIZACION_FOLIO}")
+
+    style_barra = TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ])
+
+    elems = []
+    datos = Table([
+        [Paragraph(f"<b>Cliente:</b> {CLIENTE_NOMBRE}", e["normal"])],
+        [Paragraph(f"<b>Direccion:</b> {COTIZACION_DIRECCION_OBRA}", e["normal"])],
+        [Paragraph(f"<b>Tipo de proyecto:</b> {NOMBRE_OBRA.upper()}", e["normal"])],
+    ], colWidths=[17.4 * cm])
+    datos.setStyle(TableStyle([("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+    elems.append(datos)
+    elems.append(Spacer(1, 8))
+
+    barra_desc = Table([["Descripcion general:"]], colWidths=[17.4 * cm])
+    barra_desc.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#dbe4ef")),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    elems.append(barra_desc)
+    elems.append(Spacer(1, 6))
+    for parrafo in COTIZACION_DESCRIPCION_GENERAL.split("\n\n"):
+        if parrafo.strip():
+            elems.append(Paragraph(parrafo.strip(), e["normal"]))
+            elems.append(Spacer(1, 4))
+    elems.append(Spacer(1, 8))
+
+    anchos = [1.4 * cm, 8.6 * cm, 1.6 * cm, 2.4 * cm, 2.4 * cm, 2.4 * cm]
+    filas = [["Clave", "Descripcion del Concepto Tecnico", "Semanas", "Materiales\n(Suministros)",
+              "Mano de Obra", "Importe Total"]]
+    estilos_extra = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+    ]
+    total_materiales_directo = 0.0
+    total_mo_directo = 0.0
+    for idx, (_, fase_r) in enumerate(df_presupuesto.iterrows(), start=1):
+        mat = float(fase_r["Materiales"])
+        mo = float(fase_r["Mano de Obra"])
+        total_materiales_directo += mat
+        total_mo_directo += mo
+        nombre_corto = fase_r["Fase"].split(":", 1)[-1].strip() if ":" in fase_r["Fase"] else fase_r["Fase"]
+        fila_fase = len(filas)
+        filas.append([f"FASE {idx}: {nombre_corto.upper()}", "", str(fase_r["Semanas"] or ""),
+                     _dinero(mat), _dinero(mo), _dinero(mat + mo)])
+        estilos_extra += [
+            ("SPAN", (0, fila_fase), (1, fila_fase)),
+            ("BACKGROUND", (0, fila_fase), (-1, fila_fase), colors.HexColor("#2c4b6e")),
+            ("TEXTCOLOR", (0, fila_fase), (-1, fila_fase), colors.white),
+            ("FONTNAME", (0, fila_fase), (-1, fila_fase), "Helvetica-Bold"),
+        ]
+        if str(fase_r["descripcion_materiales"] or "").strip():
+            filas.append([f"{idx}.01", Paragraph(str(fase_r["descripcion_materiales"]), e["chico"]),
+                         "", _dinero(mat), "$0.00", _dinero(mat)])
+        if str(fase_r["descripcion_mano_obra"] or "").strip():
+            filas.append([f"{idx}.02", Paragraph(str(fase_r["descripcion_mano_obra"]), e["chico"]),
+                         "", "$0.00", _dinero(mo), _dinero(mo)])
+
+    fila_sub = len(filas)
+    filas.append(["SUBTOTAL COSTO DIRECTO TOTAL DE OBRA", "", "", _dinero(total_materiales_directo),
+                 _dinero(total_mo_directo), _dinero(total_materiales_directo + total_mo_directo)])
+    estilos_extra += [
+        ("SPAN", (0, fila_sub), (1, fila_sub)),
+        ("BACKGROUND", (0, fila_sub), (-1, fila_sub), colors.HexColor("#c9d4e0")),
+        ("FONTNAME", (0, fila_sub), (-1, fila_sub), "Helvetica-Bold"),
+    ]
+
+    fila_ind = len(filas)
+    filas.append(["Administracion y Gastos Indirectos (%):", "", "1-" + str(len(df_presupuesto)),
+                 _dinero(p_indirectos), "", _dinero(p_indirectos)])
+    estilos_extra += [
+        ("SPAN", (0, fila_ind), (1, fila_ind)),
+        ("FONTNAME", (0, fila_ind), (-1, fila_ind), "Helvetica-Bold"),
+        ("FONTSIZE", (0, fila_ind), (-1, fila_ind), 8),
+    ]
+    for concepto_ind, monto_ind in INDIRECTOS.items():
+        fila_i = len(filas)
+        filas.append([Paragraph(concepto_ind, e["chico"]), "", "", _dinero(monto_ind), "", ""])
+        estilos_extra.append(("SPAN", (0, fila_i), (1, fila_i)))
+
+    fila_total = len(filas)
+    filas.append([Paragraph(
+        f"<b>TOTAL COTIZACIÓN DE CONSTRUCCIÓN Y GESTIÓN RESIDENCIA {CODIGO_OBRA}</b>",
+        e["normal"]), "", "", "", "", _dinero(total_presupuestado)])
+    estilos_extra += [
+        ("SPAN", (0, fila_total), (4, fila_total)),
+        ("BACKGROUND", (0, fila_total), (-1, fila_total), colors.HexColor("#a9bdd4")),
+        ("FONTNAME", (0, fila_total), (-1, fila_total), "Helvetica-Bold"),
+        ("FONTSIZE", (0, fila_total), (-1, fila_total), 10),
+    ]
+
+    t_principal = Table(filas, colWidths=anchos, repeatRows=1)
+    t_principal.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("FONTSIZE", (0, 1), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ] + estilos_extra))
+    elems.append(t_principal)
+    elems.append(Spacer(1, 18))
+
+    barra1 = Table([["CONDICIONES DE PAGO"]], colWidths=[17.4 * cm])
+    barra1.setStyle(style_barra)
+    elems.append(barra1)
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph(
+        f"<b>Anticipo Inicial {COTIZACION_ANTICIPO_PCT:g}%: {_dinero(COTIZACION_ANTICIPO_MONTO)}</b>"
+        + (f" ({COTIZACION_ANTICIPO_NOTA})" if COTIZACION_ANTICIPO_NOTA else ""), e["normal"]))
+    elems.append(Spacer(1, 3))
+    if COTIZACION_ANTICIPO_TEXTO.strip():
+        elems.append(Paragraph(COTIZACION_ANTICIPO_TEXTO, e["normal"]))
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph(
+        f"<b>Pagos subsecuentes {COTIZACION_SUBSECUENTES_PCT:g}%: {_dinero(COTIZACION_SUBSECUENTES_MONTO)}</b>",
+        e["normal"]))
+    elems.append(Spacer(1, 3))
+    if COTIZACION_SUBSECUENTES_TEXTO.strip():
+        elems.append(Paragraph(COTIZACION_SUBSECUENTES_TEXTO, e["normal"]))
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph(
+        f"<b>Finiquito / Entrega {COTIZACION_FINIQUITO_PCT:g}%: {_dinero(COTIZACION_FINIQUITO_MONTO)}</b>",
+        e["normal"]))
+    elems.append(Spacer(1, 3))
+    if COTIZACION_FINIQUITO_TEXTO.strip():
+        elems.append(Paragraph(COTIZACION_FINIQUITO_TEXTO, e["normal"]))
+    elems.append(Spacer(1, 14))
+
+    barra2 = Table([["NOTAS Y OTRAS CONDICIONES GENERALES ADICIONALES"]], colWidths=[17.4 * cm])
+    barra2.setStyle(style_barra)
+    elems.append(barra2)
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph(
+        f"<b>Vigencia:</b> Este presupuesto tiene una vigencia de {COTIZACION_VIGENCIA_DIAS} dias naturales a "
+        "partir de su fecha de emision, debido a la fluctuacion de precios de mercado en acero estructural y "
+        "concreto de planta.", e["normal"]))
+    elems.append(Spacer(1, 8))
+    elems.append(Paragraph(
+        "<b>Plazo de Ejecucion:</b> El tiempo estimado de entrega de obra civil y obra gris es de un maximo de "
+        f"{COTIZACION_PLAZO_MAX_SEMANAS} semanas consecutivas y un minimo de {COTIZACION_PLAZO_MIN_SEMANAS} "
+        "semanas, contadas a partir del dia habil siguiente a la recepcion del anticipo.", e["normal"]))
+    elems.append(Spacer(1, 8))
+    if COTIZACION_TRABAJOS_ADICIONALES.strip():
+        elems.append(Paragraph(f"<b>Trabajos adicionales:</b> {COTIZACION_TRABAJOS_ADICIONALES}", e["normal"]))
+        elems.append(Spacer(1, 8))
+    if COTIZACION_NOTA_EXTRA.strip():
+        elems.append(Paragraph(f"<b>Nota:</b> {COTIZACION_NOTA_EXTRA}", e["normal"]))
+
+    if COTIZACION_FIRMA_NOMBRE.strip():
+        elems.append(Spacer(1, 40))
+        firma = Table([["_______________________________"], [COTIZACION_FIRMA_NOMBRE]], colWidths=[7 * cm])
+        firma.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"), ("FONTSIZE", (0, 1), (0, 1), 9)]))
+        elems.append(firma)
+
+    doc.build(elems, onFirstPage=_membrete_cotizacion_pdf, onLaterPages=_membrete_cotizacion_pdf)
+    return buf.getvalue()
+
+
 def seccion_informes_avance(puede_editar: bool):
     st.markdown("---")
     st.subheader("📝 Informes de Avance de Obra")
@@ -3791,6 +4177,23 @@ if ES_ADMIN and PAGINA == "Informes":
                 st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
 
     st.markdown("---")
+    with st.expander("📜 Cotización de Proyecto (formato original)"):
+        st.caption(
+            "El formato completo de cotización: fases con clave y descripción técnica, subtotal, "
+            "indirectos, total, condiciones de pago y notas. Se edita en 🗄️ Administración → 🏗️ Presupuesto."
+        )
+        try:
+            st.download_button(
+                "📄 Descargar Cotización de Proyecto (PDF)",
+                generar_pdf_cotizacion_proyecto(),
+                file_name=f"cotizacion_{CODIGO_OBRA}_{COTIZACION_FOLIO}.pdf",
+                mime="application/pdf",
+                key="dl_cotizacion_proyecto_informes",
+                **FULL_WIDTH,
+            )
+        except ImportError:
+            st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
     with st.expander("📝 Resumen por Concepto (manual)"):
         st.caption(
             "Arma un resumen libre: escribe los conceptos que necesites y su importe. No depende de los "
@@ -4415,12 +4818,14 @@ if ES_ADMIN and PAGINA == "Administración":
         st.markdown("#### Fases del proyecto")
         with get_conn() as conn:
             df_fases_edit = pd.read_sql_query(
-                "SELECT id, orden, fase, semanas, materiales, mano_obra FROM presupuesto_fases ORDER BY orden, id",
+                "SELECT id, orden, fase, semanas, materiales, mano_obra, "
+                "descripcion_materiales, descripcion_mano_obra FROM presupuesto_fases ORDER BY orden, id",
                 conn,
             )
         df_fases_edit = df_fases_edit.rename(columns={
             "orden": "Orden", "fase": "Fase", "semanas": "Semanas",
             "materiales": "Materiales", "mano_obra": "Mano de Obra",
+            "descripcion_materiales": "Descripción Materiales", "descripcion_mano_obra": "Descripción Mano de Obra",
         })
         ver_presup = st.session_state.setdefault("ver_presup_fases", 0)
         fases_editado = st.data_editor(
@@ -4435,6 +4840,10 @@ if ES_ADMIN and PAGINA == "Administración":
                 "Semanas": st.column_config.TextColumn("Semanas", help='Ej. "1-4" — solo referencia para la Curva S'),
                 "Materiales": st.column_config.NumberColumn("Materiales", format="dollar", min_value=0.0, required=True),
                 "Mano de Obra": st.column_config.NumberColumn("Mano de Obra", format="dollar", min_value=0.0, required=True),
+                "Descripción Materiales": st.column_config.TextColumn(
+                    "Descripción Materiales", help="Texto técnico del concepto 'Materiales' para la Cotización de Proyecto (clave X.01)."),
+                "Descripción Mano de Obra": st.column_config.TextColumn(
+                    "Descripción Mano de Obra", help="Texto técnico del concepto 'Mano de Obra' para la Cotización de Proyecto (clave X.02)."),
             },
             hide_index=True,
             key=f"presup_fases_editor_{ver_presup}",
@@ -4520,11 +4929,14 @@ if ES_ADMIN and PAGINA == "Administración":
 
                     conn.execute("DELETE FROM presupuesto_fases")
                     conn.executemany(
-                        "INSERT INTO presupuesto_fases (id, orden, fase, semanas, materiales, mano_obra) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO presupuesto_fases "
+                        "(id, orden, fase, semanas, materiales, mano_obra, descripcion_materiales, descripcion_mano_obra) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         [
                             (int(r["id"]) if pd.notna(r["id"]) else None, int(r["Orden"]), str(r["Fase"]).strip(),
-                             str(r["Semanas"] or "").strip(), float(r["Materiales"]), float(r["Mano de Obra"]))
+                             str(r["Semanas"] or "").strip(), float(r["Materiales"]), float(r["Mano de Obra"]),
+                             str(r["Descripción Materiales"] or "").strip(),
+                             str(r["Descripción Mano de Obra"] or "").strip())
                             for _, r in fases_editado.iterrows()
                         ],
                     )
@@ -4541,3 +4953,97 @@ if ES_ADMIN and PAGINA == "Administración":
                 st.session_state["msg_presup_txt"] = "Presupuesto guardado." + nota_renombres
                 st.session_state["ver_presup_fases"] = ver_presup + 1
                 st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### 📜 Cotización de Proyecto")
+        st.caption(
+            "Datos del formato de cotización imprimible (folio, descripción general, condiciones de pago "
+            "y notas). Las fases y sus descripciones técnicas se editan arriba; aquí va todo lo demás."
+        )
+        if st.session_state.pop("msg_cotizacion", None):
+            st.success("Datos de la cotización guardados.")
+
+        cq1, cq2 = st.columns(2)
+        cot_folio_in = cq1.text_input("Folio (No.):", value=COTIZACION_FOLIO, key="cot_folio_in")
+        cot_direccion_in = cq2.text_input("Dirección de la obra:", value=COTIZACION_DIRECCION_OBRA, key="cot_direccion_in")
+        cot_tagline_in = st.text_input("Leyenda bajo el logo:", value=COTIZACION_TAGLINE, key="cot_tagline_in")
+        cot_desc_general_in = st.text_area(
+            "Descripción general:", value=COTIZACION_DESCRIPCION_GENERAL, height=160,
+            help="Usa una línea en blanco entre párrafos para separarlos en el PDF.", key="cot_desc_general_in",
+        )
+
+        st.markdown("**Condiciones de pago**")
+        ca1, ca2, ca3 = st.columns(3)
+        cot_ant_pct_in = ca1.number_input("Anticipo %:", min_value=0.0, max_value=100.0,
+                                          value=COTIZACION_ANTICIPO_PCT, step=1.0, key="cot_ant_pct_in")
+        cot_ant_monto_in = ca2.number_input("Anticipo $:", min_value=0.0, format="%.2f",
+                                            value=COTIZACION_ANTICIPO_MONTO, step=1000.0, key="cot_ant_monto_in")
+        cot_ant_nota_in = ca3.text_input("Nota del anticipo:", value=COTIZACION_ANTICIPO_NOTA, key="cot_ant_nota_in")
+        cot_ant_texto_in = st.text_area("Texto de justificación del anticipo:", value=COTIZACION_ANTICIPO_TEXTO,
+                                        height=80, key="cot_ant_texto_in")
+
+        cs1, cs2 = st.columns(2)
+        cot_sub_pct_in = cs1.number_input("Pagos subsecuentes %:", min_value=0.0, max_value=100.0,
+                                          value=COTIZACION_SUBSECUENTES_PCT, step=1.0, key="cot_sub_pct_in")
+        cot_sub_monto_in = cs2.number_input("Pagos subsecuentes $:", min_value=0.0, format="%.2f",
+                                            value=COTIZACION_SUBSECUENTES_MONTO, step=1000.0, key="cot_sub_monto_in")
+        cot_sub_texto_in = st.text_area("Texto de justificación de los pagos subsecuentes:",
+                                        value=COTIZACION_SUBSECUENTES_TEXTO, height=80, key="cot_sub_texto_in")
+
+        cf1, cf2 = st.columns(2)
+        cot_fin_pct_in = cf1.number_input("Finiquito %:", min_value=0.0, max_value=100.0,
+                                          value=COTIZACION_FINIQUITO_PCT, step=1.0, key="cot_fin_pct_in")
+        cot_fin_monto_in = cf2.number_input("Finiquito $:", min_value=0.0, format="%.2f",
+                                            value=COTIZACION_FINIQUITO_MONTO, step=1000.0, key="cot_fin_monto_in")
+        cot_fin_texto_in = st.text_area("Texto de justificación del finiquito:", value=COTIZACION_FINIQUITO_TEXTO,
+                                        height=80, key="cot_fin_texto_in")
+
+        suma_pagos = cot_ant_monto_in + cot_sub_monto_in + cot_fin_monto_in
+        st.caption(f"Suma de anticipo + subsecuentes + finiquito: ${suma_pagos:,.2f} "
+                  f"(presupuesto total actual: ${total_presupuestado:,.2f})")
+
+        st.markdown("**Notas y condiciones generales**")
+        cn1, cn2, cn3 = st.columns(3)
+        cot_vigencia_in = cn1.text_input("Vigencia (días):", value=COTIZACION_VIGENCIA_DIAS, key="cot_vigencia_in")
+        cot_plazo_min_in = cn2.text_input("Plazo mínimo (semanas):", value=COTIZACION_PLAZO_MIN_SEMANAS, key="cot_plazo_min_in")
+        cot_plazo_max_in = cn3.text_input("Plazo máximo (semanas):", value=COTIZACION_PLAZO_MAX_SEMANAS, key="cot_plazo_max_in")
+        cot_trabajos_in = st.text_area("Trabajos adicionales (cláusula):", value=COTIZACION_TRABAJOS_ADICIONALES,
+                                       height=80, key="cot_trabajos_in")
+        cot_nota_extra_in = st.text_area("Nota adicional:", value=COTIZACION_NOTA_EXTRA, height=80, key="cot_nota_extra_in")
+        cot_firma_in = st.text_input("Nombre para la firma:", value=COTIZACION_FIRMA_NOMBRE, key="cot_firma_in")
+
+        if st.button("💾 Guardar datos de la cotización", key="btn_guardar_cotizacion"):
+            if not cot_folio_in.strip():
+                st.error("El folio no puede quedar vacío.")
+            else:
+                for clave, valor in {
+                    "cotizacion_folio": cot_folio_in, "cotizacion_tagline": cot_tagline_in,
+                    "cotizacion_direccion_obra": cot_direccion_in,
+                    "cotizacion_descripcion_general": cot_desc_general_in,
+                    "cotizacion_anticipo_pct": str(cot_ant_pct_in), "cotizacion_anticipo_monto": str(cot_ant_monto_in),
+                    "cotizacion_anticipo_nota": cot_ant_nota_in, "cotizacion_anticipo_texto": cot_ant_texto_in,
+                    "cotizacion_subsecuentes_pct": str(cot_sub_pct_in),
+                    "cotizacion_subsecuentes_monto": str(cot_sub_monto_in),
+                    "cotizacion_subsecuentes_texto": cot_sub_texto_in,
+                    "cotizacion_finiquito_pct": str(cot_fin_pct_in), "cotizacion_finiquito_monto": str(cot_fin_monto_in),
+                    "cotizacion_finiquito_texto": cot_fin_texto_in,
+                    "cotizacion_vigencia_dias": cot_vigencia_in,
+                    "cotizacion_plazo_min_semanas": cot_plazo_min_in, "cotizacion_plazo_max_semanas": cot_plazo_max_in,
+                    "cotizacion_trabajos_adicionales": cot_trabajos_in, "cotizacion_nota_extra": cot_nota_extra_in,
+                    "cotizacion_firma_nombre": cot_firma_in,
+                }.items():
+                    guardar_config(clave, valor.strip() if isinstance(valor, str) else valor)
+                st.session_state["msg_cotizacion"] = True
+                st.rerun()
+
+        try:
+            st.download_button(
+                "📄 Descargar Cotización de Proyecto (PDF)",
+                generar_pdf_cotizacion_proyecto(),
+                file_name=f"cotizacion_{CODIGO_OBRA}_{COTIZACION_FOLIO}.pdf",
+                mime="application/pdf",
+                key="dl_cotizacion_proyecto",
+                **FULL_WIDTH,
+            )
+        except ImportError:
+            st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
