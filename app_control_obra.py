@@ -40,6 +40,85 @@ DB_PATH = DB_DIR / "control_obra_je132.db"
 COMPROBANTES_DIR = DB_DIR / "comprobantes"
 COMPROBANTES_DIR.mkdir(parents=True, exist_ok=True)
 
+# ---------------------------------------------------------------
+# USUARIOS: bootstrap que corre ANTES del login (init_db() completo corre después,
+# ya autenticado). Crea la tabla y, la primera vez, siembra un usuario por cada
+# contraseña de rol que ya existiera en variables de entorno — así nadie pierde
+# acceso al pasar de contraseñas por variable de entorno a usuarios en la base de datos.
+# ---------------------------------------------------------------
+import hashlib
+import secrets as _secrets
+
+
+def _hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100_000).hex()
+
+
+def _bootstrap_usuarios() -> None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario TEXT NOT NULL UNIQUE,
+                nombre TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                rol TEXT NOT NULL,
+                activo INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        if conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0] == 0:
+            candidatos = [
+                ("admin", "Administrador", os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD", ""), "admin"),
+                ("residente", "Residente de Obra", os.environ.get("RESIDENTE_PASSWORD", ""), "residente"),
+                ("cliente", "Cliente", os.environ.get("CLIENTE_PASSWORD", ""), "cliente"),
+            ]
+            for usuario, nombre, pwd_env, rol in candidatos:
+                if pwd_env:
+                    salt = _secrets.token_hex(16)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO usuarios (usuario, nombre, password_hash, salt, rol, activo) "
+                        "VALUES (?, ?, ?, ?, ?, 1)",
+                        (usuario, nombre, _hash_password(pwd_env, salt), salt, rol),
+                    )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _verificar_usuario_db(usuario: str, password: str):
+    """Verifica usuario/contraseña contra la tabla usuarios. Devuelve (rol, nombre) o None.
+    Usa una conexión independiente: puede correr antes de que get_conn()/init_db() existan."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT rol, nombre, password_hash, salt FROM usuarios WHERE usuario = ? AND activo = 1",
+            (usuario.strip(),),
+        ).fetchone()
+        conn.close()
+    except sqlite3.OperationalError:
+        return None
+    if not row:
+        return None
+    rol, nombre, hash_guardado, salt = row
+    if _hash_password(password, salt) == hash_guardado:
+        return (rol, nombre)
+def _hay_usuarios_activos() -> bool:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        n = conn.execute("SELECT COUNT(*) FROM usuarios WHERE activo = 1").fetchone()[0]
+        conn.close()
+        return n > 0
+    except sqlite3.OperationalError:
+        return False
+
+
+_bootstrap_usuarios()
+
+
 FASE_INDIRECTOS = "Gastos Indirectos"
 TIPOS_DIRECTOS = ["Materiales", "Mano de Obra"]
 EXTENSIONES_IMAGEN = {".jpg", ".jpeg", ".png", ".webp"}
@@ -253,27 +332,16 @@ def _f_fecha(v) -> str:
 # ---------------------------------------------------------------
 # CONTROL DE ACCESO Y ROLES
 # ---------------------------------------------------------------
-def determinar_rol(pwd: str) -> str | None:
-    """Devuelve 'admin', 'residente', 'cliente' o None según la contraseña ingresada."""
-    admin_pwd = os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD", "")
-    residente_pwd = os.environ.get("RESIDENTE_PASSWORD", "")
-    cliente_pwd = os.environ.get("CLIENTE_PASSWORD", "")
-    if admin_pwd and pwd == admin_pwd:
-        return "admin"
-    if residente_pwd and pwd == residente_pwd:
-        return "residente"
-    if cliente_pwd and pwd == cliente_pwd:
-        return "cliente"
-    return None
-
 
 def verificar_acceso() -> bool:
     hay_passwords = bool(
         os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
         or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")
-    )
+    ) or _hay_usuarios_activos()
     if not hay_passwords:
         st.session_state.rol = "admin"  # Modo local/desarrollo
+        st.session_state.nombre_actual = "Administrador"
+        st.session_state.usuario_actual = "admin"
         return True
 
     if st.session_state.get("rol"):
@@ -282,15 +350,19 @@ def verificar_acceso() -> bool:
     st.title("🔒 Control de Obra")
     st.caption("Acceso restringido")
     with st.form("form_login"):
-        pwd = st.text_input("Contraseña de acceso:", type="password")
+        usuario_in = st.text_input("Usuario:")
+        pwd = st.text_input("Contraseña:", type="password")
         entrar = st.form_submit_button("Entrar")
     if entrar:
-        rol = determinar_rol(pwd)
-        if rol:
+        resultado = _verificar_usuario_db(usuario_in, pwd)
+        if resultado:
+            rol, nombre = resultado
             st.session_state.rol = rol
+            st.session_state.nombre_actual = nombre
+            st.session_state.usuario_actual = usuario_in.strip()
             st.rerun()
         else:
-            st.error("Contraseña incorrecta.")
+            st.error("Usuario o contraseña incorrectos.")
     return False
 
 
@@ -1210,9 +1282,11 @@ COTIZACION_FIRMA_NOMBRE = leer_config("cotizacion_firma_nombre", "")
 # ---------------------------------------------------------------
 # ENCABEZADO V4
 # ---------------------------------------------------------------
-rol_hero = {"admin": "Administrador", "residente": "Residente de Obra", "cliente": "Cliente"}.get(
+rol_hero_base = {"admin": "Administrador", "residente": "Residente de Obra", "cliente": "Cliente"}.get(
     st.session_state.get("rol", "admin"), "Administrador"
 )
+nombre_sesion = st.session_state.get("nombre_actual", "")
+rol_hero = f"{nombre_sesion} · {rol_hero_base}" if nombre_sesion else rol_hero_base
 st.markdown(
     f'''<div class="obra-hero">
       <div class="eyebrow">{CONTRATISTAS_TEXTO} · Control integral de obra</div>
@@ -1228,6 +1302,8 @@ st.markdown(
 # ---------------------------------------------------------------
 rol_etiquetas = {"admin": "👷 Administrador", "residente": "📐 Residente de Obra", "cliente": "👤 Cliente (solo consulta)"}
 rol_texto = rol_etiquetas.get(st.session_state.get("rol", "admin"), "👷 Administrador")
+if nombre_sesion:
+    rol_texto = f"{rol_texto} — {nombre_sesion}"
 st.sidebar.markdown("### CONTROL DE OBRA")
 st.sidebar.caption(OBRA_TITULO)
 st.sidebar.markdown(f"**Sesión:** {rol_texto}")
@@ -1290,11 +1366,14 @@ st.sidebar.radio(
 PAGINA = st.session_state["pagina_actual"]
 
 if (os.environ.get("ADMIN_PASSWORD") or os.environ.get("APP_PASSWORD")
-        or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")):
+        or os.environ.get("RESIDENTE_PASSWORD") or os.environ.get("CLIENTE_PASSWORD")
+        or _hay_usuarios_activos()):
     st.sidebar.markdown("---")
     if st.sidebar.button("Cerrar sesión", **FULL_WIDTH):
         st.session_state.pop("rol", None)
         st.session_state.pop("autenticado", None)
+        st.session_state.pop("nombre_actual", None)
+        st.session_state.pop("usuario_actual", None)
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -4459,8 +4538,8 @@ if ES_ADMIN and PAGINA == "Administración":
         "respaldarla, explorarla, consultarla con SQL y restaurarla."
     )
 
-    tab_resp, tab_expl, tab_sql, tab_rest, tab_diag, tab_presup = st.tabs(
-        ["💾 Respaldo", "🔎 Explorador", "⌨️ Consola SQL", "♻️ Restaurar", "🩺 Comprobantes", "🏗️ Presupuesto"]
+    tab_resp, tab_expl, tab_sql, tab_rest, tab_diag, tab_presup, tab_users = st.tabs(
+        ["💾 Respaldo", "🔎 Explorador", "⌨️ Consola SQL", "♻️ Restaurar", "🩺 Comprobantes", "🏗️ Presupuesto", "👥 Usuarios"]
     )
 
     # --- Respaldo ---
@@ -5047,3 +5126,125 @@ if ES_ADMIN and PAGINA == "Administración":
             )
         except ImportError:
             st.error("Falta la librería reportlab. Agrega 'reportlab' al requirements.txt.")
+
+    # --- Usuarios (crear, cambiar contraseña, activar/desactivar) ---
+    with tab_users:
+        st.caption(
+            "Cada persona entra con su propio usuario y contraseña. Antes las contraseñas vivían en "
+            "variables de entorno de Railway (una sola por rol); ahora se administran aquí, sin tocar código."
+        )
+        if st.session_state.pop("msg_user", None):
+            st.success(st.session_state.pop("msg_user_txt", "Listo."))
+
+        with get_conn() as conn:
+            df_users = pd.read_sql_query(
+                "SELECT id, usuario, nombre, rol, activo FROM usuarios ORDER BY id", conn
+            )
+        n_admins_activos = int(((df_users["rol"] == "admin") & (df_users["activo"] == 1)).sum())
+
+        st.markdown("#### Usuarios existentes")
+        if df_users.empty:
+            st.info("Aún no hay usuarios registrados.")
+        else:
+            df_users_vista = df_users.copy()
+            df_users_vista["activo"] = df_users_vista["activo"].map({1: "✅ Activo", 0: "🚫 Inactivo"})
+            st.dataframe(
+                df_users_vista.rename(columns={"usuario": "Usuario", "nombre": "Nombre",
+                                               "rol": "Rol", "activo": "Estado"}).drop(columns=["id"]),
+                hide_index=True, **FULL_WIDTH,
+            )
+
+        st.markdown("---")
+        st.markdown("#### ➕ Agregar usuario")
+        with st.form("form_nuevo_usuario", clear_on_submit=True):
+            nu1, nu2 = st.columns(2)
+            nuevo_usuario_in = nu1.text_input("Usuario (para iniciar sesión):")
+            nuevo_nombre_in = nu2.text_input("Nombre:")
+            nu3, nu4 = st.columns(2)
+            nuevo_rol_in = nu3.selectbox("Rol:", ["admin", "residente", "cliente"])
+            nueva_pwd_in = nu4.text_input("Contraseña:", type="password")
+            if st.form_submit_button("Crear usuario"):
+                usuario_limpio = nuevo_usuario_in.strip().lower()
+                if not usuario_limpio or not nuevo_nombre_in.strip() or not nueva_pwd_in:
+                    st.error("Usuario, nombre y contraseña son obligatorios.")
+                elif len(nueva_pwd_in) < 4:
+                    st.error("La contraseña debe tener al menos 4 caracteres.")
+                elif usuario_limpio in df_users["usuario"].str.lower().values:
+                    st.error(f"Ya existe un usuario con el nombre '{usuario_limpio}'.")
+                else:
+                    salt_nuevo = _secrets.token_hex(16)
+                    with get_conn() as conn:
+                        conn.execute(
+                            "INSERT INTO usuarios (usuario, nombre, password_hash, salt, rol, activo) "
+                            "VALUES (?, ?, ?, ?, ?, 1)",
+                            (usuario_limpio, nuevo_nombre_in.strip(),
+                             _hash_password(nueva_pwd_in, salt_nuevo), salt_nuevo, nuevo_rol_in),
+                        )
+                    st.session_state["msg_user"] = True
+                    st.session_state["msg_user_txt"] = f"Usuario '{usuario_limpio}' creado."
+                    st.rerun()
+
+        if not df_users.empty:
+            st.markdown("---")
+            st.markdown("#### 🔑 Cambiar contraseña")
+            usuario_pwd_sel = st.selectbox(
+                "Usuario:", df_users["id"].tolist(),
+                format_func=lambda i: f"{df_users.set_index('id').loc[i, 'usuario']} "
+                                      f"({df_users.set_index('id').loc[i, 'nombre']})",
+                key="sel_user_pwd",
+            )
+            nueva_pwd2 = st.text_input("Nueva contraseña:", type="password", key="nueva_pwd_cambio")
+            if st.button("💾 Guardar nueva contraseña"):
+                if len(nueva_pwd2) < 4:
+                    st.error("La contraseña debe tener al menos 4 caracteres.")
+                else:
+                    salt_cambio = _secrets.token_hex(16)
+                    with get_conn() as conn:
+                        conn.execute(
+                            "UPDATE usuarios SET password_hash = ?, salt = ? WHERE id = ?",
+                            (_hash_password(nueva_pwd2, salt_cambio), salt_cambio, int(usuario_pwd_sel)),
+                        )
+                    st.session_state["msg_user"] = True
+                    st.session_state["msg_user_txt"] = "Contraseña actualizada."
+                    st.rerun()
+
+            st.markdown("---")
+            st.markdown("#### 🚫 Activar, desactivar o eliminar")
+            usuario_est_sel = st.selectbox(
+                "Usuario:", df_users["id"].tolist(),
+                format_func=lambda i: f"{df_users.set_index('id').loc[i, 'usuario']} "
+                                      f"({df_users.set_index('id').loc[i, 'nombre']}, "
+                                      f"{'activo' if df_users.set_index('id').loc[i, 'activo'] == 1 else 'inactivo'})",
+                key="sel_user_estado",
+            )
+            fila_sel = df_users.set_index("id").loc[usuario_est_sel]
+            es_ultimo_admin = (fila_sel["rol"] == "admin" and fila_sel["activo"] == 1 and n_admins_activos <= 1)
+
+            ce1, ce2 = st.columns(2)
+            with ce1:
+                if fila_sel["activo"] == 1:
+                    if st.button("🚫 Desactivar", disabled=es_ultimo_admin, key="btn_desactivar_user"):
+                        with get_conn() as conn:
+                            conn.execute("UPDATE usuarios SET activo = 0 WHERE id = ?", (int(usuario_est_sel),))
+                        st.session_state["msg_user"] = True
+                        st.session_state["msg_user_txt"] = f"Usuario '{fila_sel['usuario']}' desactivado."
+                        st.rerun()
+                    if es_ultimo_admin:
+                        st.caption("⚠️ Es el único administrador activo; no se puede desactivar.")
+                else:
+                    if st.button("✅ Reactivar", key="btn_reactivar_user"):
+                        with get_conn() as conn:
+                            conn.execute("UPDATE usuarios SET activo = 1 WHERE id = ?", (int(usuario_est_sel),))
+                        st.session_state["msg_user"] = True
+                        st.session_state["msg_user_txt"] = f"Usuario '{fila_sel['usuario']}' reactivado."
+                        st.rerun()
+            with ce2:
+                conf_del_user = st.checkbox("Confirmo eliminar este usuario permanentemente", key="conf_del_user")
+                if st.button("🗑️ Eliminar usuario", disabled=not conf_del_user or es_ultimo_admin, key="btn_del_user"):
+                    with get_conn() as conn:
+                        conn.execute("DELETE FROM usuarios WHERE id = ?", (int(usuario_est_sel),))
+                    st.session_state["msg_user"] = True
+                    st.session_state["msg_user_txt"] = f"Usuario '{fila_sel['usuario']}' eliminado."
+                    st.rerun()
+                if es_ultimo_admin:
+                    st.caption("⚠️ Es el único administrador activo; no se puede eliminar.")
